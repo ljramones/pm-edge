@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import uuid4
 
-from sqlalchemy import Column, JSON
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 

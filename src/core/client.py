@@ -7,12 +7,12 @@ direct Polymarket and Kalshi SDK adapters when PMXT is unavailable.
 
 from __future__ import annotations
 
-import inspect
 import importlib
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -20,7 +20,6 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from core.config import Settings, get_settings
 from utils.logging import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -279,9 +278,12 @@ class PredictionMarketClient:
 
     def _load_polymarket_client(self) -> Any | None:
         return self._load_first_client(
-            module_names=("polymarket", "polymarket_sdk", "polymarket_python_sdk"),
-            class_names=("AsyncClient", "Client", "PolymarketClient"),
-            kwargs={"api_key": self.settings.polymarket_api_key},
+            module_names=("py_clob_client_v2", "py_clob_client.client"),
+            class_names=("AsyncClient", "ClobClient", "Client", "PolymarketClient"),
+            kwargs={
+                "host": self.settings.polymarket_base_url,
+                "key": self.settings.polymarket_api_key,
+            },
         )
 
     def _load_kalshi_client(self) -> Any | None:
@@ -429,7 +431,9 @@ class PredictionMarketClient:
             market_id=str(data.get("market_id") or data.get("id") or ""),
             outcome=str(data.get("outcome") or data.get("side") or ""),
             size=Decimal(str(data.get("size") or data.get("quantity") or "0")),
-            average_price=self._optional_decimal(data.get("average_price") or data.get("avg_price")),
+            average_price=self._optional_decimal(
+                data.get("average_price") or data.get("avg_price")
+            ),
             raw=data,
         )
 
@@ -448,11 +452,11 @@ class PredictionMarketClient:
         if raw is None:
             return {}
         if isinstance(raw, BaseModel):
-            return raw.model_dump()
+            return cast(dict[str, Any], raw.model_dump())
         if isinstance(raw, dict):
             return raw
         if hasattr(raw, "dict"):
-            return raw.dict()
+            return cast(dict[str, Any], raw.dict())
         return {
             name: getattr(raw, name)
             for name in dir(raw)

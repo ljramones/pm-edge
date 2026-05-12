@@ -38,7 +38,7 @@ dependencies = [
     "tenacity>=8.5.0",
     "tqdm>=4.66.0",
     "pmxt>=0.1.0",
-    "polymarket-python-sdk>=0.3.0",
+    "py-clob-client-v2>=1.0.0",
     "kalshi-python>=0.3.0",
 ]
 
@@ -52,6 +52,7 @@ dev = [
     "pre-commit>=3.7.0",
     "ipykernel>=6.0.0",
     "jupyter>=1.0.0",
+    "py-clob-client>=0.34.0",
 ]
 
 [project.scripts]
@@ -84,9 +85,6 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "C4", "SIM", "UP", "ASYNC"]
 ignore = ["E501"]
-
-[tool.ruff.lint.isort]
-lines-after-imports = 2
 
 [tool.mypy]
 python_version = "3.11"

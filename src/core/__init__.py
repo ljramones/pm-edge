@@ -16,11 +16,14 @@ from core.client import (
     Venue,
 )
 from core.config import Settings, get_settings
-
+from core.scanner import ArbitrageOpportunity, MarketScanner, MarketScanResult, MarketSnapshot
 
 __all__ = [
     "BackendUnavailableError",
     "Market",
+    "MarketScanner",
+    "MarketScanResult",
+    "MarketSnapshot",
     "OrderBook",
     "OrderRequest",
     "OrderResult",
@@ -33,5 +36,6 @@ __all__ = [
     "Side",
     "UnifiedMarket",
     "Venue",
+    "ArbitrageOpportunity",
     "get_settings",
 ]

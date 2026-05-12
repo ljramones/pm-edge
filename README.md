@@ -18,7 +18,7 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 ## Finalized Stack
 
 - **Core runtime:** Python 3.11+, async-first architecture, `httpx`
-- **Unified market access:** PMXT (`pmxt`) first, with Polymarket and Kalshi SDK fallbacks
+- **Unified market access:** PMXT (`pmxt`) first, with Polymarket CLOB (`py-clob-client-v2`) and Kalshi SDK fallbacks
 - **Data and modeling:** pandas, numpy, scikit-learn, LightGBM
 - **Persistence:** SQLModel with SQLite for local development and Postgres/Supabase-style deployments
 - **Configuration:** Pydantic v2 + pydantic-settings + `.env`
@@ -37,10 +37,10 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 - [x] SQLModel market, price, resolution, position, and trade models
 - [x] Async unified client foundation with PMXT-first fallback design
 - [x] Structured logging setup
-- [ ] Unified client integration tests against mocked PMXT / direct SDK adapters
-- [ ] Real-time market scanner + arbitrage detector
-- [ ] Historical resolved market database
-- [ ] Paper trading engine with full logging
+- [x] Unified client integration tests against mocked PMXT / direct SDK adapters
+- [x] Real-time market scanner + arbitrage detector
+- [x] Historical resolved market database
+- [x] Paper trading engine with full logging
 
 ### Phase 1 - Core Edge Signals
 
