@@ -10,6 +10,8 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 
 Phase 8 liquidity-first hybrid strategy is now implemented. The repo has the Phase 0 trading foundation, Phase 1 edge-signal components, Phase 2 backtesting/evaluation, Phase 3 historical signal generation plus Kelly-style portfolio simulation, Phase 4A optional LLM/on-chain feature groups, Phase 4 live paper monitoring, Phase 5 deep comparison/report tooling, Phase 6 failure/feature diagnostics, Phase 7 crypto/sample/liquidity iteration tracks, and Phase 8 fear routing plus hardened liquidity-harvest risk controls. A real historical 2025 high-volume-market run still requires configured market/data backfills.
 
+For a detailed architecture and implementation walkthrough, see [Technical Overview](docs/TECHNICAL_OVERVIEW.md).
+
 Current committed milestone line:
 
 - `3531cef` - bootstrap project foundation
