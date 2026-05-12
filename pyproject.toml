@@ -1,0 +1,106 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pm-edge"
+version = "0.1.0"
+description = "Systematic prediction market trading system for Polymarket and Kalshi"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "you@example.com"},
+]
+keywords = ["prediction-markets", "polymarket", "kalshi", "quant", "trading"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+]
+dependencies = [
+    "httpx>=0.28.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "lightgbm>=4.5.0",
+    "scikit-learn>=1.5.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.4.0",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.0",
+    "structlog>=24.4.0",
+    "sqlmodel>=0.0.18",
+    "psycopg[binary]>=3.2.0",
+    "tenacity>=8.5.0",
+    "tqdm>=4.66.0",
+    "pmxt>=0.1.0",
+    "polymarket-python-sdk>=0.3.0",
+    "kalshi-python>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pre-commit>=3.7.0",
+    "ipykernel>=6.0.0",
+    "jupyter>=1.0.0",
+]
+
+[project.scripts]
+pm-scan = "scripts.scan:main"
+pm-paper = "scripts.paper_trade:main"
+pm-backtest = "scripts.backtest:main"
+pm-trade = "scripts.trade:main"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "src/backtesting",
+    "src/core",
+    "src/data",
+    "src/execution",
+    "src/features",
+    "src/models",
+    "src/strategies",
+    "src/utils",
+    "scripts",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "C4", "SIM", "UP", "ASYNC"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "--strict-markers"
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src", "scripts"]
