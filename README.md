@@ -8,7 +8,7 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 
 ## Status
 
-Phase 1 is complete. The repo now has the Phase 0 trading foundation plus reusable edge-signal components for poll aggregation, news sentiment velocity, cross-market features, baseline models, a GBDT wrapper, and ranked edge scoring.
+Phase 3 framework is complete. The repo now has the Phase 0 trading foundation, Phase 1 edge-signal components, Phase 2 backtesting/evaluation, and Phase 3 historical signal generation plus Kelly-style portfolio simulation. A real historical 2025 high-volume-market run still requires configured market/data backfills.
 
 Current committed milestone line:
 
@@ -66,6 +66,22 @@ Current committed milestone line:
 
 ### Phase 2 - Advanced
 
+- [x] Time-series walk-forward split logic
+- [x] Deterministic signal backtester with slippage and venue fee assumptions
+- [x] Predictive/economic/robustness metrics
+- [x] Pre-registered Decision-Grade / Promising / Fail rubric
+- [x] Backtest CLI and analysis notebook template
+
+### Phase 3 - Historical Signals + Portfolio Simulation
+
+- [x] Resumable historical signal generation CLI with partitioned parquet output
+- [x] Fractional Kelly portfolio allocator with exposure, confidence, liquidity, and correlation controls
+- [x] Portfolio backtester with periodic rebalancing, equity curve, turnover, and exposure tracking
+- [x] Portfolio-level rubric metrics
+- [x] Portfolio analysis notebook template
+
+### Phase 4 - Live / Advanced
+
 - [ ] Catalyst calendar + pre-event positioning
 - [ ] Kelly / fractional Kelly portfolio allocator
 - [ ] Domain-specific models (elections, crypto events, macro, etc.)
@@ -114,6 +130,21 @@ Important Phase 1 modules:
 - `src/models/gbdt.py` - LightGBM probability model with time-series calibration fallback
 - `src/strategies/edge_detector.py` - `EdgeSignal` generation and ranked market scoring
 
+Important Phase 2 modules:
+
+- `src/backtesting/data_split.py` - walk-forward split generation that respects resolution dates
+- `src/backtesting/backtester.py` - deterministic signal backtester with venue fees, slippage, PnL, and persistence
+- `src/backtesting/metrics.py` - Brier/log-loss, calibration, rank correlation, hit rates, PnL, Sharpe, Sortino, drawdown, and robustness cuts
+- `src/backtesting/rubric.py` - fixed evaluation thresholds and multiple-testing note
+- `notebooks/backtest_analysis.ipynb` - calibration, PnL, and category analysis template
+
+Important Phase 3 modules:
+
+- `scripts/generate_signals.py` - resumable historical signal generation to partitioned parquet
+- `src/execution/portfolio.py` - fractional Kelly allocation with risk and liquidity caps
+- `src/backtesting/portfolio_backtester.py` - portfolio rebalancing simulation and equity-curve metrics
+- `notebooks/portfolio_analysis.ipynb` - independent-bet vs Kelly portfolio analysis template
+
 ---
 
 ## Installation
@@ -160,6 +191,18 @@ python -m scripts.scan --venue polymarket
 
 # Submit a deterministic paper order
 python -m scripts.paper_trade --market-id demo --outcome Yes --side buy --price 0.50 --size 2
+
+# Run deterministic demo backtest
+python -m scripts.backtest --no-save --edge-threshold 0.02 --stake 50
+
+# Backtest a historical signal file
+python -m scripts.backtest --strategy gbdt_v1 --period 2025-01-01:2026-05-01 --walk-forward --signals data/processed/signals.parquet
+
+# Generate reusable historical signal partitions
+python -m scripts.generate_signals --start-date 2025-03-01 --end-date 2025-05-01 --markets high-volume
+
+# Run portfolio-level Kelly backtest
+python -m scripts.backtest --portfolio --kelly-fraction 0.4 --max-exposure 0.2 --signals data/processed/signals.parquet
 ```
 
 Console scripts are also configured after installation:
@@ -170,6 +213,7 @@ pm-paper
 pm-backtest
 pm-trade
 pm-edge
+pm-generate-signals
 ```
 
 Basic client/scanner usage:

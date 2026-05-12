@@ -43,8 +43,12 @@ dependencies = [
     "kalshi-python>=0.3.0",
     "beautifulsoup4>=4.12.0",
     "feedparser>=6.0.0",
+    "matplotlib>=3.9.0",
     "newsapi-python>=0.2.7",
+    "plotly>=5.24.0",
+    "pyarrow>=17.0.0",
     "vaderSentiment>=3.3.2",
+    "seaborn>=0.13.0",
 ]
 
 [project.optional-dependencies]
@@ -66,6 +70,7 @@ pm-paper = "scripts.paper_trade:main"
 pm-backtest = "scripts.backtest:main"
 pm-trade = "scripts.trade:main"
 pm-edge = "scripts.edge:main"
+pm-generate-signals = "scripts.generate_signals:main"
 
 [tool.hatch.build.targets.wheel]
 packages = [
@@ -104,6 +109,7 @@ module = [
     "lightgbm",
     "pandas",
     "sklearn.*",
+    "tqdm",
     "vaderSentiment.*",
 ]
 ignore_missing_imports = true

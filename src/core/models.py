@@ -184,3 +184,40 @@ class FeatureVectorRecord(SQLModel, table=True):
     market_probability: Decimal | None = Field(default=None, max_digits=12, decimal_places=6)
     resolved_probability: Decimal | None = Field(default=None, max_digits=12, decimal_places=6)
     created_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class BacktestRun(SQLModel, table=True):
+    """Backtest run metadata and aggregate output."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    strategy_name: str = Field(index=True)
+    started_at: datetime = Field(default_factory=utc_now, index=True)
+    period_start: datetime | None = Field(default=None, index=True)
+    period_end: datetime | None = Field(default=None, index=True)
+    config: dict[str, object] = Field(default_factory=dict, sa_column=Column(JSON))
+    metrics: dict[str, float | str] = Field(default_factory=dict, sa_column=Column(JSON))
+    rubric_grade: str | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class BacktestBet(SQLModel, table=True):
+    """Simulated backtest bet and realized outcome."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    run_id: str = Field(foreign_key="backtestrun.id", index=True)
+    market_id: str = Field(index=True)
+    category: str | None = Field(default=None, index=True)
+    signal_time: datetime = Field(index=True)
+    resolution_time: datetime | None = Field(default=None, index=True)
+    market_probability: Decimal = Field(max_digits=12, decimal_places=6)
+    model_probability: Decimal = Field(max_digits=12, decimal_places=6)
+    edge: Decimal = Field(max_digits=12, decimal_places=6)
+    threshold: Decimal = Field(max_digits=12, decimal_places=6)
+    stake: Decimal = Field(max_digits=18, decimal_places=6)
+    entry_price: Decimal = Field(max_digits=12, decimal_places=6)
+    slippage: Decimal = Field(default=Decimal("0"), max_digits=12, decimal_places=6)
+    fee: Decimal = Field(default=Decimal("0"), max_digits=18, decimal_places=6)
+    outcome: int = Field(index=True)
+    pnl: Decimal = Field(max_digits=18, decimal_places=6)
+    return_on_capital: Decimal = Field(max_digits=12, decimal_places=6)
+    raw: dict[str, object] = Field(default_factory=dict, sa_column=Column(JSON))
