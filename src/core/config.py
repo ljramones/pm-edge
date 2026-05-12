@@ -49,6 +49,7 @@ class Settings(BaseSettings):
 
     news_api_key: SecretStr | None = None
     etherscan_api_key: SecretStr | None = None
+    gdelt_base_url: str = "https://api.gdeltproject.org/api/v2/doc/doc"
 
     http_timeout_seconds: float = Field(default=20.0, ge=1.0)
     http_max_connections: int = Field(default=20, ge=1)

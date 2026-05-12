@@ -28,6 +28,7 @@ dependencies = [
     "numpy>=1.26.0",
     "lightgbm>=4.5.0",
     "scikit-learn>=1.5.0",
+    "polars>=1.18.0",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
     "python-dotenv>=1.0.0",
@@ -40,11 +41,15 @@ dependencies = [
     "pmxt>=0.1.0",
     "py-clob-client-v2>=1.0.0",
     "kalshi-python>=0.3.0",
+    "beautifulsoup4>=4.12.0",
+    "feedparser>=6.0.0",
+    "newsapi-python>=0.2.7",
+    "vaderSentiment>=3.3.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "black>=24.0.0",
+    "black[jupyter]>=24.0.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
     "pytest>=8.0.0",
@@ -60,6 +65,7 @@ pm-scan = "scripts.scan:main"
 pm-paper = "scripts.paper_trade:main"
 pm-backtest = "scripts.backtest:main"
 pm-trade = "scripts.trade:main"
+pm-edge = "scripts.edge:main"
 
 [tool.hatch.build.targets.wheel]
 packages = [
@@ -92,6 +98,15 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "lightgbm",
+    "pandas",
+    "sklearn.*",
+    "vaderSentiment.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

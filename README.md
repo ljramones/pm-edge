@@ -8,12 +8,13 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 
 ## Status
 
-Phase 0 is complete. The repo now has a typed async client boundary, mocked backend tests, a scanner/arbitrage detector, local market-history persistence, and an in-memory paper trading engine. Strategy-specific edge logic starts in Phase 1.
+Phase 1 is complete. The repo now has the Phase 0 trading foundation plus reusable edge-signal components for poll aggregation, news sentiment velocity, cross-market features, baseline models, a GBDT wrapper, and ranked edge scoring.
 
-Current verified commit line:
+Current committed milestone line:
 
 - `3531cef` - bootstrap project foundation
 - `2f698a3` - finish Phase 0 foundation
+- `0931c27` - update README for Phase 0
 
 ---
 
@@ -55,10 +56,13 @@ Current verified commit line:
 
 ### Phase 1 - Core Edge Signals
 
-- [ ] Poll aggregation engine
-- [ ] News + sentiment velocity features
-- [ ] Cross-market correlation models
-- [ ] Simple probabilistic baseline models (Logistic / GBDT)
+- [x] Poll aggregation engine
+- [x] News + sentiment velocity features
+- [x] Cross-market correlation models
+- [x] Simple probabilistic baseline models (Logistic / Ridge / IC-weighted)
+- [x] LightGBM probability model wrapper
+- [x] Unified feature store
+- [x] Edge detector and ranked edge CLI
 
 ### Phase 2 - Advanced
 
@@ -99,6 +103,16 @@ Important Phase 0 modules:
 - `src/core/models.py` - SQLModel tables for markets, prices, resolutions, positions, and trades
 - `src/data/database.py` - SQLite/Postgres-compatible historical market store
 - `src/execution/paper.py` - in-memory paper trading engine with risk checks and structured logs
+
+Important Phase 1 modules:
+
+- `src/data/poll_aggregator.py` - poll normalization, weighting, persistence, and historical aggregates
+- `src/data/news_sentiment.py` - NewsAPI/GDELT adapters, keyword linking, VADER/fallback sentiment, velocity features
+- `src/features/cross_market.py` - rolling correlations, divergence, lead-lag, conditional-probability features
+- `src/features/feature_store.py` - unified feature vectors across polls, sentiment, market structure, and history
+- `src/models/baselines.py` - logistic, ridge, and IC-weighted baseline probability models
+- `src/models/gbdt.py` - LightGBM probability model with time-series calibration fallback
+- `src/strategies/edge_detector.py` - `EdgeSignal` generation and ranked market scoring
 
 ---
 
@@ -155,6 +169,7 @@ pm-scan
 pm-paper
 pm-backtest
 pm-trade
+pm-edge
 ```
 
 Basic client/scanner usage:
@@ -170,6 +185,12 @@ async def main() -> None:
         scanner = MarketScanner(client, min_edge_bps=Decimal("25"))
         result = await scanner.scan_once([Venue.POLYMARKET, Venue.KALSHI])
         print(result.opportunities[:3])
+```
+
+Rank markets by Phase 1 edge score:
+
+```bash
+python -m scripts.edge --venue polymarket --limit 10
 ```
 
 Configuration is loaded from `.env` using the `PM_EDGE_` prefix. Local development defaults to SQLite at `data/pm_edge.db`; set `PM_EDGE_DATABASE_URL` to a Postgres URL for deployed environments.
