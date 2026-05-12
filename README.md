@@ -6,6 +6,17 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 
 ---
 
+## Status
+
+Phase 0 is complete. The repo now has a typed async client boundary, mocked backend tests, a scanner/arbitrage detector, local market-history persistence, and an in-memory paper trading engine. Strategy-specific edge logic starts in Phase 1.
+
+Current verified commit line:
+
+- `3531cef` - bootstrap project foundation
+- `2f698a3` - finish Phase 0 foundation
+
+---
+
 ## Philosophy
 
 - Edge comes from **speed + synthesis** of public information, not from secret signals.
@@ -63,14 +74,14 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 ```bash
 pm-edge/
 ├── src/
-│   ├── core/           # Market clients, unified interface
-│   ├── data/           # Scrapers, poll aggregators, on-chain, news
+│   ├── core/           # Config, unified client, scanner, arbitrage detection
+│   ├── data/           # Persistence, scrapers, poll aggregators, on-chain, news
 │   ├── features/       # Feature engineering
 │   ├── models/         # Probability models + baselines
-│   ├── strategies/     # Arb, sentiment, catalyst strategies
-│   ├── execution/      # Position sizing, risk, portfolio
+│   ├── strategies/     # Arb, sentiment, catalyst strategy modules
+│   ├── execution/      # Paper trading, position sizing, risk, portfolio
 │   ├── backtesting/    # Simulation and evaluation
-│   └── utils/          # Config, logging, helpers
+│   └── utils/          # Logging and shared helpers
 ├── notebooks/          # Exploration and analysis
 ├── config/
 ├── data/               # .gitignore'd
@@ -80,6 +91,14 @@ pm-edge/
 ├── README.md
 └── .env.example
 ```
+
+Important Phase 0 modules:
+
+- `src/core/client.py` - async `PredictionMarketClient` facade with PMXT-first fallback design
+- `src/core/scanner.py` - one-pass scanner and cross-venue arbitrage detector
+- `src/core/models.py` - SQLModel tables for markets, prices, resolutions, positions, and trades
+- `src/data/database.py` - SQLite/Postgres-compatible historical market store
+- `src/execution/paper.py` - in-memory paper trading engine with risk checks and structured logs
 
 ---
 
@@ -98,6 +117,14 @@ source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 ```
 
+With `uv`:
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+```
+
 Copy environment variables:
 
 ```bash
@@ -111,14 +138,14 @@ Then fill in your API keys.
 ## Usage
 
 ```bash
-# Scan for opportunities
-python -m scripts.scan
+# Scan both venues for cross-venue opportunities
+python -m scripts.scan --min-edge-bps 25
 
-# Run paper trading simulation
-python -m scripts.paper_trade
+# Scan one venue
+python -m scripts.scan --venue polymarket
 
-# Backtest a strategy
-python -m scripts.backtest --strategy sentiment_v1
+# Submit a deterministic paper order
+python -m scripts.paper_trade --market-id demo --outcome Yes --side buy --price 0.50 --size 2
 ```
 
 Console scripts are also configured after installation:
@@ -130,16 +157,19 @@ pm-backtest
 pm-trade
 ```
 
-Basic client usage:
+Basic client/scanner usage:
 
 ```python
-from core import PredictionMarketClient, Venue
+from decimal import Decimal
+
+from core import MarketScanner, PredictionMarketClient, Venue
 
 
 async def main() -> None:
     async with PredictionMarketClient() as client:
-        markets = await client.fetch_markets([Venue.POLYMARKET, Venue.KALSHI])
-        print(markets[:3])
+        scanner = MarketScanner(client, min_edge_bps=Decimal("25"))
+        result = await scanner.scan_once([Venue.POLYMARKET, Venue.KALSHI])
+        print(result.opportunities[:3])
 ```
 
 Configuration is loaded from `.env` using the `PM_EDGE_` prefix. Local development defaults to SQLite at `data/pm_edge.db`; set `PM_EDGE_DATABASE_URL` to a Postgres URL for deployed environments.
@@ -152,6 +182,16 @@ Configuration is loaded from `.env` using the `PM_EDGE_` prefix. Local developme
 - Uses modern packaging (`pyproject.toml` + `hatchling`) and is uv-compatible
 - Pre-commit-ready quality tooling
 - Structured logging
+
+Quality gates:
+
+```bash
+pytest
+ruff check .
+black --check .
+ruff format --check .
+mypy src scripts
+```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development workflow.
 
