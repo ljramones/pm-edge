@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from core import OrderBook, UnifiedMarket, Venue
+from data.llm_news_processor import LLMNewsSummary
 from data.news_sentiment import SentimentVector
 from data.poll_aggregator import PollAggregate
 from features import FeatureStore
@@ -61,3 +62,32 @@ async def test_feature_store_combines_phase1_inputs() -> None:
     assert vector.features["poll_top_probability"] == 0.6
     assert vector.features["mention_count_7d"] == 20
     assert vector.features["book_imbalance"] > 0
+
+
+@pytest.mark.asyncio
+async def test_feature_store_merges_advanced_inputs() -> None:
+    as_of = datetime(2026, 5, 12, tzinfo=UTC)
+    market = UnifiedMarket(
+        venue=Venue.POLYMARKET,
+        market_id="m-advanced",
+        title="Will BTC rally?",
+        outcomes=["Yes", "No"],
+    )
+
+    vector = await FeatureStore().build_market_features(
+        market,
+        llm_summary=LLMNewsSummary(
+            market_id="m-advanced",
+            market_title="Will BTC rally?",
+            as_of=as_of,
+            provider="fallback",
+            model="lexical",
+            article_count=1,
+            sentiment=0.2,
+            probability_signal=0.58,
+        ),
+        as_of=as_of,
+    )
+
+    assert vector.features["llm_probability"] == 0.58
+    assert vector.raw["llm_summary"] is not None

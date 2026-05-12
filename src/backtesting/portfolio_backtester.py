@@ -161,6 +161,9 @@ class PortfolioBacktester:
                 cast(float | int | str, row.get("confidence", min(abs(edge) / 0.1, 1.0)))
             ),
             reasoning=["historical signal row"],
+            features={
+                "top_book_liquidity": float(cast(float | int | str, row.get("liquidity", 0.0)))
+            },
         )
 
     def _simulate_target(
@@ -212,6 +215,10 @@ def portfolio_metrics(equity_curve: pd.DataFrame, *, starting_capital: float) ->
     )
     pnl = equity_curve["period_pnl"].astype(float)
     drawdown = max_drawdown(pnl)
+    equity_drawdown = (
+        equity_curve["equity"].astype(float) - equity_curve["equity"].astype(float).cummax()
+    )
+    equity_drawdown_pct = float((equity_drawdown / starting_capital).min())
     return {
         "portfolio_final_equity": float(equity_curve["equity"].iloc[-1]),
         "portfolio_return": float(equity_curve["equity"].iloc[-1] / starting_capital - 1),
@@ -221,6 +228,7 @@ def portfolio_metrics(equity_curve: pd.DataFrame, *, starting_capital: float) ->
             else 0.0
         ),
         "portfolio_max_drawdown": drawdown,
+        "portfolio_max_drawdown_pct": equity_drawdown_pct,
         "portfolio_calmar": float(pnl.sum() / abs(drawdown)) if drawdown else 0.0,
         "average_turnover": float(equity_curve["turnover"].mean()),
         "max_exposure": float(equity_curve["exposure"].max()),
@@ -232,6 +240,8 @@ def portfolio_config_from_backtest_config(
     *,
     kelly_fraction: float,
     max_exposure: float,
+    quarter_kelly: bool = False,
+    min_post_cost_edge: float = 0.0,
 ) -> PortfolioBacktestConfig:
     """Create portfolio config from existing independent-bet config."""
 
@@ -244,5 +254,8 @@ def portfolio_config_from_backtest_config(
             kelly_fraction=kelly_fraction,
             max_total_exposure=max_exposure,
             min_edge=config.edge_threshold,
+            quarter_kelly=quarter_kelly,
+            min_cash_buffer=0.30 if quarter_kelly else 0.0,
+            min_post_cost_edge=min_post_cost_edge,
         ),
     )

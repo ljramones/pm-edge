@@ -11,8 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.client import OrderBook, PredictionMarketClient, UnifiedMarket
 from core.models import FeatureVectorRecord, utc_now
+from data.llm_news_processor import LLMNewsSummary
 from data.news_sentiment import SentimentVector
+from data.onchain_processor import OnChainMetricSnapshot
 from data.poll_aggregator import PollAggregate
+from features.advanced_features import AdvancedFeatureExtractor, AdvancedFeatureInputs
 from features.cross_market import CrossMarketAnalyzer, CrossMarketFeatureSet
 from utils.logging import get_logger
 
@@ -45,9 +48,11 @@ class FeatureStore:
         *,
         client: PredictionMarketClient | None = None,
         cross_market_analyzer: CrossMarketAnalyzer | None = None,
+        advanced_extractor: AdvancedFeatureExtractor | None = None,
     ) -> None:
         self.client = client
         self.cross_market_analyzer = cross_market_analyzer or CrossMarketAnalyzer()
+        self.advanced_extractor = advanced_extractor or AdvancedFeatureExtractor()
 
     async def build_market_features(
         self,
@@ -60,6 +65,10 @@ class FeatureStore:
         related_market_id: str | None = None,
         resolution_stats: dict[str, float] | None = None,
         order_book: OrderBook | None = None,
+        advanced_features: dict[str, float] | None = None,
+        llm_summary: LLMNewsSummary | None = None,
+        onchain_snapshot: OnChainMetricSnapshot | None = None,
+        news_velocity: dict[str, float] | None = None,
         as_of: datetime | None = None,
     ) -> FeatureVector:
         """Build a single market feature vector."""
@@ -87,6 +96,19 @@ class FeatureStore:
         features.update(cross_market_features(cross_market))
         features.update(microstructure_features(book))
         features.update(resolution_stats or {})
+        if advanced_features is not None:
+            features.update(advanced_features)
+        elif llm_summary is not None or onchain_snapshot is not None or news_velocity is not None:
+            features.update(
+                self.advanced_extractor.extract(
+                    AdvancedFeatureInputs(
+                        llm_summary=llm_summary,
+                        onchain_snapshot=onchain_snapshot,
+                        sentiment_vector=sentiment_vector,
+                        news_velocity=news_velocity or {},
+                    )
+                )
+            )
 
         market_probability = _market_probability(book)
         logger.info(
@@ -101,7 +123,13 @@ class FeatureStore:
             as_of=snapshot_time,
             features=features,
             market_probability=market_probability,
-            raw={"market": market.model_dump(mode="json")},
+            raw={
+                "market": market.model_dump(mode="json"),
+                "llm_summary": llm_summary.model_dump(mode="json") if llm_summary else None,
+                "onchain_snapshot": (
+                    onchain_snapshot.model_dump(mode="json") if onchain_snapshot else None
+                ),
+            },
         )
 
     def materialize_record(

@@ -36,6 +36,11 @@ class KellyPortfolioConfig:
     min_confidence: float = 0.05
     liquidity_fraction_cap: float = 0.1
     correlation_penalty: float = 0.5
+    quarter_kelly: bool = False
+    min_cash_buffer: float = 0.0
+    min_post_cost_edge: float = 0.0
+    impact_coefficient: float = 0.10
+    max_cluster_exposure: float = 0.12
 
 
 class KellyFractionalPortfolio:
@@ -56,10 +61,13 @@ class KellyFractionalPortfolio:
 
         candidates: list[TargetPosition] = []
         for signal in signals:
-            if (
-                abs(signal.edge) < self.config.min_edge
-                or signal.confidence < self.config.min_confidence
-            ):
+            edge_for_gate = (
+                self._post_cost_edge(signal)
+                if self.config.min_post_cost_edge > 0
+                else abs(signal.edge)
+            )
+            edge_threshold = max(self.config.min_edge, self.config.min_post_cost_edge)
+            if edge_for_gate < edge_threshold or signal.confidence < self.config.min_confidence:
                 continue
 
             direction = 1 if signal.edge > 0 else -1
@@ -92,12 +100,13 @@ class KellyFractionalPortfolio:
             )
 
         total_weight = sum(position.target_weight for position in candidates)
-        if total_weight <= self.config.max_total_exposure:
+        exposure_cap = min(self.config.max_total_exposure, 1.0 - self.config.min_cash_buffer)
+        if total_weight <= exposure_cap:
             return sorted(
                 candidates, key=lambda item: abs(item.edge) * item.confidence, reverse=True
             )
 
-        scale = self.config.max_total_exposure / total_weight
+        scale = exposure_cap / total_weight
         return sorted(
             [
                 position.model_copy(
@@ -119,7 +128,13 @@ class KellyFractionalPortfolio:
             full_kelly = (model_prob - market_prob) / max(1 - market_prob, 1e-9)
         else:
             full_kelly = (market_prob - model_prob) / max(market_prob, 1e-9)
-        return float(max(0.0, full_kelly * self.config.kelly_fraction * signal.confidence))
+        kelly_fraction = 0.25 if self.config.quarter_kelly else self.config.kelly_fraction
+        return float(max(0.0, full_kelly * kelly_fraction * signal.confidence))
+
+    def _post_cost_edge(self, signal: EdgeSignal) -> float:
+        liquidity = max(float(signal.features.get("top_book_liquidity", 0.0)), 1.0)
+        impact = self.config.impact_coefficient / (liquidity**0.5)
+        return float(max(0.0, abs(signal.edge) - impact))
 
     def _correlation_multiplier(
         self,

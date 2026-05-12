@@ -51,6 +51,20 @@ class Settings(BaseSettings):
     etherscan_api_key: SecretStr | None = None
     gdelt_base_url: str = "https://api.gdeltproject.org/api/v2/doc/doc"
 
+    use_advanced_features: bool = False
+    llm_provider: Literal["openai", "claude", "grok"] = "openai"
+    llm_model: str | None = None
+    llm_cache_dir: Path = Path("data/processed/llm_cache")
+    llm_max_requests_per_minute: int = Field(default=20, ge=1)
+    llm_max_batch_cost_usd: float = Field(default=5.0, ge=0.0)
+    openai_api_key: SecretStr | None = None
+    anthropic_api_key: SecretStr | None = None
+    grok_api_key: SecretStr | None = None
+
+    defillama_base_url: str = "https://api.llama.fi"
+    dune_api_key: SecretStr | None = None
+    arkham_api_key: SecretStr | None = None
+
     http_timeout_seconds: float = Field(default=20.0, ge=1.0)
     http_max_connections: int = Field(default=20, ge=1)
     retry_attempts: int = Field(default=3, ge=1)
@@ -60,6 +74,28 @@ class Settings(BaseSettings):
     paper_trading: bool = True
     max_order_notional_usd: float = Field(default=100.0, gt=0)
     max_portfolio_notional_usd: float = Field(default=1_000.0, gt=0)
+    paper_trader_interval_seconds: int = Field(default=900, ge=1)
+    paper_trader_virtual_capital_usd: float = Field(default=10_000.0, gt=0)
+    paper_trader_min_volume_usd: float = Field(default=500_000.0, ge=0)
+    paper_trader_max_markets: int = Field(default=50, ge=1)
+    paper_trader_review_mode: bool = True
+    paper_trader_review_threshold: float = Field(default=0.08, ge=0.0)
+    paper_trader_review_timeout_seconds: int = Field(default=0, ge=0)
+    paper_trader_state_path: Path = Path("data/processed/live_paper/state.json")
+    paper_trader_audit_log_path: Path = Path("data/processed/live_paper/audit.jsonl")
+    paper_trader_review_flag_path: Path = Path("data/processed/live_paper/review_approval.txt")
+    paper_trader_alert_webhook_url: SecretStr | None = None
+    paper_trader_telegram_bot_token: SecretStr | None = None
+    paper_trader_telegram_chat_id: str | None = None
+    paper_trader_discord_webhook_url: SecretStr | None = None
+    telegram_enabled: bool = False
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str | None = None
+    telegram_rate_limit_seconds: float = Field(default=1.0, ge=0.0)
+    fear_layer_enabled: bool = False
+    quarter_kelly: bool = False
+    min_post_cost_edge: float = Field(default=0.05, ge=0.0)
+    liquidity_harvest_mode: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property

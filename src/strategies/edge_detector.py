@@ -37,9 +37,12 @@ class EdgeDetector:
         self,
         feature_store: FeatureStore,
         models: list[ProbabilityModel] | None = None,
+        *,
+        use_advanced_features: bool = False,
     ) -> None:
         self.feature_store = feature_store
         self.models = models or []
+        self.use_advanced_features = use_advanced_features
 
     async def score_market(
         self,
@@ -55,6 +58,11 @@ class EdgeDetector:
         inferred_market_prob = market_probability or vector.market_probability or Decimal("0.5")
         market_prob = float(inferred_market_prob)
         model_prob = self._model_probability(vector)
+        advanced_adjustment = (
+            self._advanced_probability_adjustment(vector) if self.use_advanced_features else 0.0
+        )
+        if advanced_adjustment:
+            model_prob = float(np.clip(model_prob + advanced_adjustment, 0.01, 0.99))
         edge = model_prob - market_prob
         confidence = self._confidence(vector, edge)
         reasoning = self._reasoning(vector, market_prob, model_prob)
@@ -65,6 +73,7 @@ class EdgeDetector:
             model_prob=model_prob,
             edge=edge,
             confidence=confidence,
+            advanced_adjustment=advanced_adjustment,
         )
         return EdgeSignal(
             market_id=market.market_id,
@@ -113,14 +122,53 @@ class EdgeDetector:
         )
         return float(np.clip(probability, 0.01, 0.99))
 
+    def _advanced_probability_adjustment(self, vector: FeatureVector) -> float:
+        llm_probability = vector.features.get("llm_probability")
+        llm_score = vector.features.get("llm_news_score", 0.0)
+        llm_momentum = vector.features.get("llm_news_momentum", 0.0)
+        onchain = (
+            vector.features.get("onchain_tvl_change_24h", 0.0)
+            + 0.20 * vector.features.get("onchain_volume_surge", 0.0)
+            + 0.05 * vector.features.get("onchain_whale_activity", 0.0)
+        )
+        uncertainty = vector.features.get("llm_uncertainty", 0.5)
+        agreement = vector.features.get("cross_source_agreement", 0.0)
+        fear_multiplier = vector.features.get("fear_sizing_multiplier", 1.0)
+        if llm_probability is None:
+            return 0.0
+        raw = (
+            0.08 * (llm_probability - 0.5) + 0.04 * llm_score + 0.03 * llm_momentum + 0.03 * onchain
+        )
+        confidence_multiplier = max(0.25, 1.0 - uncertainty) * (0.75 + 0.25 * agreement)
+        adjustment = raw * confidence_multiplier * max(0.25, min(1.25, fear_multiplier))
+        logger.info(
+            "advanced_feature_contribution",
+            market_id=vector.market_id,
+            llm_probability=llm_probability,
+            llm_score=llm_score,
+            llm_momentum=llm_momentum,
+            onchain_score=onchain,
+            uncertainty=uncertainty,
+            agreement=agreement,
+            adjustment=adjustment,
+        )
+        return float(np.clip(adjustment, -0.08, 0.08))
+
     def _confidence(self, vector: FeatureVector, edge: float) -> float:
         poll_count = min(vector.features.get("poll_count", 0.0) / 10, 1.0)
         mentions = min(vector.features.get("mention_count_7d", 0.0) / 50, 1.0)
         liquidity = min(vector.features.get("top_book_liquidity", 0.0) / 1000, 1.0)
         magnitude = min(abs(edge) / 0.10, 1.0)
+        agreement = min(vector.features.get("cross_source_agreement", 0.0), 1.0)
         return float(
             np.clip(
-                0.25 * poll_count + 0.20 * mentions + 0.25 * liquidity + 0.30 * magnitude, 0.0, 1.0
+                0.22 * poll_count
+                + 0.18 * mentions
+                + 0.22 * liquidity
+                + 0.28 * magnitude
+                + 0.10 * agreement,
+                0.0,
+                1.0,
             )
         )
 
@@ -133,4 +181,14 @@ class EdgeDetector:
         ]
         if vector.features.get("spread", 0.0) > 0:
             reasons.append(f"spread {vector.features['spread']:.3f}")
+        if self.use_advanced_features and "llm_probability" in vector.features:
+            reasons.append(
+                "advanced llm probability "
+                f"{vector.features.get('llm_probability', 0.5):.3f}, "
+                f"uncertainty {vector.features.get('llm_uncertainty', 0.5):.3f}"
+            )
+        if self.use_advanced_features and vector.features.get("onchain_tvl_change_24h", 0.0):
+            reasons.append(
+                f"on-chain tvl change {vector.features.get('onchain_tvl_change_24h', 0.0):.3f}"
+            )
         return reasons

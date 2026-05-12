@@ -58,6 +58,7 @@ def main() -> None:
             config,
             kelly_fraction=args.kelly_fraction,
             max_exposure=args.max_exposure,
+            quarter_kelly=False,
         )
         portfolio_result = PortfolioBacktester(portfolio_config).run(
             signals,

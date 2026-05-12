@@ -49,6 +49,8 @@ dependencies = [
     "pyarrow>=17.0.0",
     "vaderSentiment>=3.3.2",
     "seaborn>=0.13.0",
+    "streamlit>=1.40.0",
+    "aiogram>=3.13.0",
 ]
 
 [project.optional-dependencies]
@@ -71,6 +73,10 @@ pm-backtest = "scripts.backtest:main"
 pm-trade = "scripts.trade:main"
 pm-edge = "scripts.edge:main"
 pm-generate-signals = "scripts.generate_signals:main"
+pm-paper-trade = "scripts.live_paper:main"
+pm-deep-backtest = "scripts.deep_backtest:main"
+pm-generate-report = "scripts.generate_report:main"
+pm-liquidity-backtest = "scripts.liquidity_backtest:main"
 
 [tool.hatch.build.targets.wheel]
 packages = [
@@ -80,6 +86,7 @@ packages = [
     "src/execution",
     "src/features",
     "src/models",
+    "src/monitoring",
     "src/strategies",
     "src/utils",
     "scripts",
@@ -111,6 +118,7 @@ module = [
     "sklearn.*",
     "tqdm",
     "vaderSentiment.*",
+    "aiogram.*",
 ]
 ignore_missing_imports = true
 

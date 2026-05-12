@@ -2,6 +2,7 @@
 
 from backtesting.backtester import BacktestConfig, Backtester, BacktestResult, FeeModel
 from backtesting.data_split import WalkForwardConfig, WalkForwardSplit, WalkForwardSplitter
+from backtesting.deep_analysis import DeepAnalysisResult, DeepRunArtifact, analyze_deep_backtest
 from backtesting.metrics import BacktestMetrics, CalibrationBucket, EvaluationReport
 from backtesting.portfolio_backtester import (
     PortfolioBacktestConfig,
@@ -16,6 +17,8 @@ __all__ = [
     "BacktestResult",
     "Backtester",
     "CalibrationBucket",
+    "DeepAnalysisResult",
+    "DeepRunArtifact",
     "EvaluationReport",
     "EvaluationRubric",
     "FeeModel",
@@ -26,4 +29,5 @@ __all__ = [
     "WalkForwardConfig",
     "WalkForwardSplit",
     "WalkForwardSplitter",
+    "analyze_deep_backtest",
 ]
