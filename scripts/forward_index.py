@@ -116,6 +116,7 @@ async def run() -> None:
                 depth=args.book_depth_levels,
                 client=client,
                 ws_connect=ws_connect,
+                min_volume_usd=args.min_24h_volume_usd,
             )
         )
     if "kalshi" in selected_venues:

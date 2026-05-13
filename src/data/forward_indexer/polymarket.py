@@ -37,10 +37,12 @@ class PolymarketIndexer(VenueIndexer):
         ws_connect: WsConnect | None = None,
         max_ws_connections: int = 4,
         gamma_url: str | None = None,
+        min_volume_usd: float = 10_000.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.gamma_url = (gamma_url or get_settings().polymarket_gamma_url).rstrip("/")
         self.depth = depth
+        self.min_volume_usd = min_volume_usd
         self.client = client or httpx.AsyncClient(timeout=20.0)
         self._owns_client = client is None
         self.ws_connect = ws_connect
@@ -74,6 +76,7 @@ class PolymarketIndexer(VenueIndexer):
                 "limit": "500",
                 "order": "volume_num",
                 "ascending": "false",
+                "volume_num_min": str(self.min_volume_usd),
             }
             if cursor:
                 params["after_cursor"] = cursor

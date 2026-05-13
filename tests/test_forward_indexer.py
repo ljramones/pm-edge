@@ -348,6 +348,7 @@ async def test_polymarket_discovery_uses_gamma_active_filter() -> None:
     assert client.requests[0]["url"].startswith("https://gamma-api.polymarket.com/markets")
     assert client.requests[0]["params"]["closed"] == "false"
     assert client.requests[0]["params"]["active"] == "true"
+    assert client.requests[0]["params"]["volume_num_min"] == "10000.0"
 
 
 @pytest.mark.asyncio
