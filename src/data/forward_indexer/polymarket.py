@@ -245,10 +245,19 @@ class PolymarketIndexer(VenueIndexer):
     ) -> dict[str, Any]:
         backoff = 1.0
         while True:
-            response = await self.client.get(url, params=params)
-            if response.status_code != 429:
-                response.raise_for_status()
-                return dict(response.json())
+            try:
+                response = await self.client.get(url, params=params)
+                if response.status_code != 429:
+                    response.raise_for_status()
+                    return dict(response.json())
+            except httpx.RequestError as exc:
+                self._stats.errors_since_heartbeat += 1
+                self._logger.warning(
+                    "polymarket_request_retry",
+                    error=str(exc),
+                    backoff=backoff,
+                    url=url,
+                )
             await asyncio.sleep(backoff + random.uniform(0, backoff * 0.1))
             backoff = min(backoff * 2, 60.0)
 

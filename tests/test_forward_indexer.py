@@ -306,6 +306,45 @@ async def test_polymarket_discovery_uses_gamma_active_filter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_polymarket_discovery_retries_transient_request_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("data.forward_indexer.polymarket.asyncio.sleep", fast_sleep)
+    client = FlakyRecordingAsyncClient(
+        [
+            {
+                "markets": [
+                    {
+                        "id": "gamma-market-1",
+                        "question": "Will BTC close above 100k?",
+                        "conditionId": "condition-1",
+                        "active": True,
+                        "closed": False,
+                        "clobTokenIds": '["yes-token", "no-token"]',
+                        "volumeNum": "2500",
+                    }
+                ],
+                "next_cursor": None,
+            }
+        ]
+    )
+    indexer = PolymarketIndexer(
+        base_url="https://clob.polymarket.com",
+        gamma_url="https://gamma-api.polymarket.com",
+        client=client,
+    )
+
+    markets = await indexer.discover_markets()
+
+    assert markets[0].market_id == "condition-1"
+    assert len(client.requests) == 2
+    assert indexer.stats().errors_since_heartbeat == 1
+
+
+@pytest.mark.asyncio
 async def test_kalshi_discovery_includes_open_status_filter() -> None:
     client = RecordingAsyncClient(
         [
@@ -455,6 +494,16 @@ class RecordingAsyncClient:
 
     async def get(self, url: str, params: dict[str, str] | None = None) -> httpx.Response:
         self.requests.append({"url": url, "params": params or {}})
+        request = httpx.Request("GET", url)
+        payload = self.payloads.pop(0) if self.payloads else {}
+        return httpx.Response(200, json=payload, request=request)
+
+
+class FlakyRecordingAsyncClient(RecordingAsyncClient):
+    async def get(self, url: str, params: dict[str, str] | None = None) -> httpx.Response:
+        self.requests.append({"url": url, "params": params or {}})
+        if len(self.requests) == 1:
+            raise httpx.ReadTimeout("timed out")
         request = httpx.Request("GET", url)
         payload = self.payloads.pop(0) if self.payloads else {}
         return httpx.Response(200, json=payload, request=request)
