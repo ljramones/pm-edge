@@ -249,24 +249,49 @@ class Backtester:
 def normalize_signal_frame(frame: pd.DataFrame) -> pd.DataFrame:
     """Normalize and validate signal rows for backtesting."""
 
+    if frame.empty:
+        return frame.copy()
+
     required = {
         "market_id",
         "as_of",
-        "resolved_at",
-        "venue",
         "market_probability",
         "model_probability",
-        "outcome",
     }
     missing = required - set(frame.columns)
     if missing:
-        raise ValueError(f"Missing required signal columns: {sorted(missing)}")
+        raise ValueError(
+            "Missing required signal columns for backtesting: "
+            f"{sorted(missing)}. Regenerate signals with scripts.generate_signals."
+        )
     output = frame.copy()
+    if "venue" not in output:
+        output["venue"] = Venue.POLYMARKET.value
+    if "question" not in output:
+        output["question"] = output["market_id"].astype(str)
+    if "edge" not in output:
+        output["edge"] = output["model_probability"].astype(float) - output[
+            "market_probability"
+        ].astype(float)
+    if "resolved_at" not in output:
+        output["resolved_at"] = pd.NaT
+    if "outcome" not in output:
+        output["outcome"] = pd.NA
     output["as_of"] = pd.to_datetime(output["as_of"], utc=True)
     output["resolved_at"] = pd.to_datetime(output["resolved_at"], utc=True)
     output["market_probability"] = output["market_probability"].astype(float).clip(0.001, 0.999)
     output["model_probability"] = output["model_probability"].astype(float).clip(0.001, 0.999)
-    output["outcome"] = output["outcome"].astype(int)
+    unresolved = output["resolved_at"].isna() | output["outcome"].isna()
+    if unresolved.any():
+        examples = output.loc[unresolved, "market_id"].astype(str).head(5).tolist()
+        raise ValueError(
+            "Backtesting requires resolved outcomes. Missing outcome/resolved_at for "
+            f"{int(unresolved.sum())} signal rows; examples={examples}. "
+            "Regenerate signals with `python -m scripts.generate_signals --include-outcomes` "
+            "after creating `data/processed/resolved_markets.parquet` with "
+            "`python -m scripts.backfill_polymarket --resolved-only`."
+        )
+    output["outcome"] = output["outcome"].astype(int).clip(0, 1)
     return output.sort_values("as_of").reset_index(drop=True)
 
 

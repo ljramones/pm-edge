@@ -291,6 +291,9 @@ python -m scripts.backtest --strategy gbdt_v1 --period 2025-01-01:2026-05-01 --w
 # Generate reusable historical signal partitions
 python -m scripts.generate_signals --start-date 2025-03-01 --end-date 2025-05-01 --markets high-volume
 
+# Backfill public Polymarket resolved markets and optional CLOB price history
+python -m scripts.backfill_polymarket --tag crypto --resolved-only --fetch-history
+
 # Generate signals with advanced feature groups
 python -m scripts.generate_signals --start-date 2025-03-01 --end-date 2025-05-01 --use-llm --use-onchain --llm-provider openai
 
@@ -335,6 +338,7 @@ pm-paper-trade
 pm-deep-backtest
 pm-generate-report
 pm-liquidity-backtest
+pm-backfill-polymarket
 ```
 
 Basic client/scanner usage:

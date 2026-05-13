@@ -41,6 +41,7 @@ class KellyPortfolioConfig:
     min_post_cost_edge: float = 0.0
     impact_coefficient: float = 0.10
     max_cluster_exposure: float = 0.12
+    ignore_liquidity_cap: bool = False
 
 
 class KellyFractionalPortfolio:
@@ -76,7 +77,7 @@ class KellyFractionalPortfolio:
                 signal.market_id, signals, correlations
             )
             capped_weight = min(penalized_weight, self.config.max_position_weight)
-            if liquidity and signal.market_id in liquidity:
+            if not self.config.ignore_liquidity_cap and liquidity and signal.market_id in liquidity:
                 capped_weight = min(
                     capped_weight,
                     liquidity[signal.market_id]

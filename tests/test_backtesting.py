@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 from sqlmodel import create_engine
 
 from backtesting import (
@@ -67,3 +68,18 @@ def test_backtester_period_filter() -> None:
     assert all(
         pd.Timestamp(row["as_of"]) <= pd.Timestamp("2025-06-01", tz=UTC) for row in result.bets
     )
+
+
+def test_backtester_requires_resolved_outcomes_with_clear_message() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["m1"],
+            "as_of": [pd.Timestamp("2025-01-01", tz="UTC")],
+            "venue": ["polymarket"],
+            "market_probability": [0.45],
+            "model_probability": [0.55],
+        }
+    )
+
+    with pytest.raises(ValueError, match="--include-outcomes"):
+        Backtester(BacktestConfig(save_results=False)).run(frame)

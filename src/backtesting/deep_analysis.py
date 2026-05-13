@@ -559,9 +559,14 @@ def flatten_feature_column(frame: pd.DataFrame) -> pd.DataFrame:
         else:
             records.append({})
     feature_frame = pd.json_normalize(records)
+    base_frame = frame.drop(columns=["features"]).reset_index(drop=True)
     if feature_frame.empty:
-        return frame
-    return pd.concat([frame.drop(columns=["features"]), feature_frame], axis=1)
+        return base_frame
+    duplicate_columns = [column for column in feature_frame.columns if column in base_frame.columns]
+    feature_frame = feature_frame.drop(columns=duplicate_columns).reset_index(drop=True)
+    if feature_frame.empty:
+        return base_frame
+    return pd.concat([base_frame, feature_frame], axis=1)
 
 
 def rubric_recommendation(primary_failure: str, metrics: Mapping[str, float]) -> str:
@@ -698,24 +703,39 @@ def _lookup_signal_context(signals: pd.DataFrame, market_id: str) -> dict[str, s
     numeric = {
         key: float(value)
         for key, value in row.items()
-        if isinstance(value, int | float) and key not in {"outcome"}
+        if isinstance(value, int | float | np.number)
+        and not isinstance(value, bool)
+        and key not in {"outcome"}
     }
     top_features = sorted(numeric.items(), key=lambda item: abs(item[1]), reverse=True)[:8]
     news_bits = [
-        str(row.get(key, ""))
+        str(value)
         for key in ["news_context", "llm_reasoning", "reasoning"]
-        if row.get(key) not in {None, ""}
+        if _is_report_scalar(value := row.get(key))
     ]
     advanced = {
         key: row.get(key)
         for key in row
         if key.startswith(("llm_", "onchain_", "news_velocity_", "cross_source_"))
+        and _is_report_scalar(row.get(key))
     }
     return {
         "top_feature_context": "; ".join(f"{key}={value:.4f}" for key, value in top_features),
         "news_context": " | ".join(news_bits)[:500],
         "advanced_context": "; ".join(f"{key}={value}" for key, value in advanced.items())[:500],
     }
+
+
+def _is_report_scalar(value: Any) -> bool:
+    """Return whether a value can be safely rendered in compact report context."""
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, bool | int | float | np.number):
+        return not pd.isna(value)
+    return False
 
 
 def _hit_rate(frame: pd.DataFrame) -> float:

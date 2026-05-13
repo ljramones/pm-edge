@@ -77,6 +77,7 @@ pm-paper-trade = "scripts.live_paper:main"
 pm-deep-backtest = "scripts.deep_backtest:main"
 pm-generate-report = "scripts.generate_report:main"
 pm-liquidity-backtest = "scripts.liquidity_backtest:main"
+pm-backfill-polymarket = "scripts.backfill_polymarket:main"
 
 [tool.hatch.build.targets.wheel]
 packages = [

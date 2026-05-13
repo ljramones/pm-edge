@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import pandas as pd
@@ -31,6 +31,7 @@ class PortfolioBacktestConfig(BaseModel):
     edge_threshold: float = 0.02
     fee_model: FeeModel = Field(default_factory=FeeModel)
     kelly: KellyPortfolioConfig = Field(default_factory=KellyPortfolioConfig)
+    diagnostic_mode: bool = False
 
 
 class PortfolioBacktestResult(BaseModel):
@@ -43,6 +44,7 @@ class PortfolioBacktestResult(BaseModel):
     equity_curve: list[dict[str, object]]
     report: EvaluationReport
     rubric: RubricDecision
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
     def trades_frame(self) -> pd.DataFrame:
         """Return simulated portfolio trades."""
@@ -87,26 +89,42 @@ class PortfolioBacktester:
                 equity_curve=[],
                 report=report,
                 rubric=self.rubric.evaluate(report.metrics),
+                diagnostics={"input_rows": 0},
             )
 
         capital = self.config.starting_capital
         trades: list[dict[str, object]] = []
         equity_curve: list[dict[str, object]] = []
+        diagnostics = self._empty_diagnostics(len(frame))
         for rebalance_time, group in frame.groupby(
             pd.Grouper(key="as_of", freq=self.config.rebalance_frequency)
         ):
             if group.empty:
                 continue
+            sizing_capital = (
+                self.config.starting_capital if self.config.diagnostic_mode else capital
+            )
             signals_for_period = [
                 self._row_to_signal(row) for row in group.to_dict(orient="records")
             ]
             liquidity = {
-                str(row["market_id"]): float(cast(float | int | str, row.get("liquidity", capital)))
+                str(row["market_id"]): float(
+                    cast(float | int | str, row.get("liquidity", sizing_capital))
+                )
                 for row in group.to_dict(orient="records")
             }
-            targets = self.allocator.allocate(
-                signals_for_period, capital=capital, liquidity=liquidity
+            self._update_diagnostics(
+                diagnostics,
+                signals_for_period=signals_for_period,
+                capital=sizing_capital,
+                liquidity=liquidity,
             )
+            targets = self.allocator.allocate(
+                signals_for_period,
+                capital=sizing_capital,
+                liquidity=None if self.config.diagnostic_mode else liquidity,
+            )
+            diagnostics["allocated_targets"] += len(targets)
             turnover = sum(target.target_notional for target in targets)
             period_pnl = 0.0
             for target in targets:
@@ -146,7 +164,78 @@ class PortfolioBacktester:
             equity_curve=equity_curve,
             report=report,
             rubric=decision,
+            diagnostics=diagnostics,
         )
+
+    def _empty_diagnostics(self, input_rows: int) -> dict[str, Any]:
+        """Return mutable allocation gate counters."""
+
+        return {
+            "diagnostic_mode": self.config.diagnostic_mode,
+            "input_rows": input_rows,
+            "rows_seen": 0,
+            "edge_rejected": 0,
+            "confidence_rejected": 0,
+            "post_cost_edge_rejected": 0,
+            "liquidity_cap_rejected": 0,
+            "kelly_size_rejected": 0,
+            "eligible_before_liquidity": 0,
+            "allocated_targets": 0,
+            "notes": [
+                (
+                    "diagnostic_mode ignores the liquidity cap during allocation"
+                    if self.config.diagnostic_mode
+                    else "standard portfolio mode applies liquidity caps"
+                )
+            ],
+        }
+
+    def _update_diagnostics(
+        self,
+        diagnostics: dict[str, Any],
+        *,
+        signals_for_period: list[EdgeSignal],
+        capital: float,
+        liquidity: dict[str, float],
+    ) -> None:
+        """Accumulate portfolio allocation rejection reasons for one rebalance group."""
+
+        for signal in signals_for_period:
+            diagnostics["rows_seen"] += 1
+            edge_for_gate = (
+                self.allocator._post_cost_edge(signal)
+                if self.config.kelly.min_post_cost_edge > 0
+                else abs(signal.edge)
+            )
+            edge_threshold = max(self.config.kelly.min_edge, self.config.kelly.min_post_cost_edge)
+            if edge_for_gate < edge_threshold:
+                if (
+                    self.config.kelly.min_post_cost_edge > 0
+                    and abs(signal.edge) >= self.config.kelly.min_edge
+                ):
+                    diagnostics["post_cost_edge_rejected"] += 1
+                else:
+                    diagnostics["edge_rejected"] += 1
+                continue
+            if signal.confidence < self.config.kelly.min_confidence:
+                diagnostics["confidence_rejected"] += 1
+                continue
+            direction = 1 if signal.edge > 0 else -1
+            raw_weight = self.allocator._kelly_weight(signal, direction=direction)
+            if raw_weight <= 0:
+                diagnostics["kelly_size_rejected"] += 1
+                continue
+            capped_weight = min(raw_weight, self.config.kelly.max_position_weight)
+            diagnostics["eligible_before_liquidity"] += 1
+            if signal.market_id in liquidity:
+                liquidity_weight = (
+                    liquidity[signal.market_id]
+                    * self.config.kelly.liquidity_fraction_cap
+                    / max(capital, 1e-9)
+                )
+                capped_weight = min(capped_weight, liquidity_weight)
+            if capped_weight <= 0:
+                diagnostics["liquidity_cap_rejected"] += 1
 
     def _row_to_signal(self, row: dict[str, object]) -> EdgeSignal:
         market_probability = float(cast(float | int | str, row["market_probability"]))
@@ -242,6 +331,7 @@ def portfolio_config_from_backtest_config(
     max_exposure: float,
     quarter_kelly: bool = False,
     min_post_cost_edge: float = 0.0,
+    diagnostic_mode: bool = False,
 ) -> PortfolioBacktestConfig:
     """Create portfolio config from existing independent-bet config."""
 
@@ -257,5 +347,7 @@ def portfolio_config_from_backtest_config(
             quarter_kelly=quarter_kelly,
             min_cash_buffer=0.30 if quarter_kelly else 0.0,
             min_post_cost_edge=min_post_cost_edge,
+            ignore_liquidity_cap=diagnostic_mode,
         ),
+        diagnostic_mode=diagnostic_mode,
     )

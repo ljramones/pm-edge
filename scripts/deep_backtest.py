@@ -57,6 +57,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fear-layer-enabled", action="store_true")
     parser.add_argument("--quarter-kelly", action="store_true")
     parser.add_argument("--min-post-cost-edge", type=float, default=0.05)
+    parser.add_argument(
+        "--diagnostic-mode",
+        action="store_true",
+        help="Ignore portfolio liquidity caps and save allocation rejection diagnostics.",
+    )
     parser.add_argument("--portfolio", action="store_true")
     parser.add_argument("--compare", action="store_true", default=True)
     parser.add_argument("--edge-threshold", type=float, default=0.02)
@@ -82,6 +87,11 @@ def main() -> None:
     signals = add_demo_advanced_columns(signals) if args.demo or args.signals is None else signals
     if args.crypto_only:
         signals = filter_crypto_signals(signals)
+    if signals.empty:
+        raise ValueError(
+            "No signals remain after loading and filters. Check --signals, --crypto-only, "
+            "and whether the parquet file has rows."
+        )
     if args.fear_layer_enabled:
         signals = add_fear_layer_columns(signals)
     run_dir = make_run_dir(args.output, args.strategy)
@@ -204,11 +214,8 @@ def execute_run(
             kelly_fraction=0.25 if getattr(args, "quarter_kelly", False) else args.kelly_fraction,
             max_exposure=args.max_exposure,
             quarter_kelly=getattr(args, "quarter_kelly", False),
-            min_post_cost_edge=(
-                getattr(args, "min_post_cost_edge", 0.0)
-                if getattr(args, "quarter_kelly", False)
-                else 0.0
-            ),
+            min_post_cost_edge=getattr(args, "min_post_cost_edge", 0.0),
+            diagnostic_mode=getattr(args, "diagnostic_mode", False),
         )
         portfolio_result = PortfolioBacktester(portfolio_config).run(
             run_signals,
@@ -225,7 +232,15 @@ def execute_run(
             output_dir / "calibration.json",
             [bucket.model_dump(mode="json") for bucket in portfolio_result.report.calibration],
         )
+        save_json(output_dir / "portfolio_diagnostics.json", portfolio_result.diagnostics)
         metrics = dict(portfolio_result.report.metrics)
+        metrics.update(
+            {
+                f"diagnostic_{key}": value
+                for key, value in portfolio_result.diagnostics.items()
+                if isinstance(value, int | float | bool)
+            }
+        )
         trades_for_artifact = trades
         if getattr(args, "mode", "directional") in {"liquidity-harvest", "hybrid"}:
             liquidity = backtest_liquidity(run_signals)
@@ -371,6 +386,7 @@ def add_fear_layer_columns(frame: pd.DataFrame) -> pd.DataFrame:
     fear = FearSnapshot(vix=28, cnn_fear_greed=35, crypto_fear_greed=30)
     rows = [router.features(row, fear=fear) for row in output.to_dict(orient="records")]
     fear_frame = pd.DataFrame(rows)
+    output = output.drop(columns=[column for column in fear_frame.columns if column in output])
     output = pd.concat([output.reset_index(drop=True), fear_frame.reset_index(drop=True)], axis=1)
     if "model_probability" in output:
         multiplier = output["fear_sizing_multiplier"].astype(float).clip(0.25, 1.25)
@@ -501,4 +517,7 @@ def np_where(condition: Any, true_value: float, false_value: float) -> pd.Series
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (FileNotFoundError, IsADirectoryError, ValueError, RuntimeError) as exc:
+        raise SystemExit(f"deep_backtest failed: {exc}") from None

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtesting.deep_analysis import DeepRunArtifact, analyze_deep_backtest
+from backtesting.deep_analysis import DeepRunArtifact, analyze_deep_backtest, flatten_feature_column
 
 
 def test_analyze_deep_backtest_returns_diagnostic_tables() -> None:
@@ -38,3 +38,19 @@ def test_analyze_deep_backtest_returns_diagnostic_tables() -> None:
     assert not result.failures.empty
     assert not result.bootstrap_intervals.empty
     assert not result.rubric_failures.empty
+
+
+def test_flatten_feature_column_drops_feature_collisions() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["m1"],
+            "fear_sizing_multiplier": [0.75],
+            "features": [{"fear_sizing_multiplier": 1.2, "llm_news_score": 0.4}],
+        }
+    )
+
+    output = flatten_feature_column(frame)
+
+    assert output.columns.tolist().count("fear_sizing_multiplier") == 1
+    assert output.loc[0, "fear_sizing_multiplier"] == 0.75
+    assert output.loc[0, "llm_news_score"] == 0.4
