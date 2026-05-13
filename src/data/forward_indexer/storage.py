@@ -57,7 +57,9 @@ class BufferedParquetWriter:
                 self._seen_keys[table].add(key)
                 self._buffers[table].append(record)
                 accepted += 1
-            if self.pending_record_count >= self.flush_max_records or self.flush_due:
+                if self.pending_record_count >= self.flush_max_records:
+                    await self._flush_unlocked()
+            if self.flush_due:
                 await self._flush_unlocked()
         return accepted
 

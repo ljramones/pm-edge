@@ -345,6 +345,26 @@ async def test_polymarket_discovery_retries_transient_request_error(
 
 
 @pytest.mark.asyncio
+async def test_polymarket_book_refresh_skips_stale_token_404() -> None:
+    market = MarketDescriptor(
+        venue="polymarket",
+        market_id="m1",
+        question="Test",
+        token_id_yes="stale-token",
+        token_id_no="no-token",
+    )
+    indexer = PolymarketIndexer(
+        base_url="https://clob.polymarket.com",
+        client=StatusCodeAsyncClient(status_code=404),
+    )
+
+    await indexer.refresh_book(market)
+
+    assert await indexer.current_book_state("m1") is None
+    assert indexer.stats().errors_since_heartbeat == 1
+
+
+@pytest.mark.asyncio
 async def test_kalshi_discovery_includes_open_status_filter() -> None:
     client = RecordingAsyncClient(
         [
@@ -507,6 +527,15 @@ class FlakyRecordingAsyncClient(RecordingAsyncClient):
         request = httpx.Request("GET", url)
         payload = self.payloads.pop(0) if self.payloads else {}
         return httpx.Response(200, json=payload, request=request)
+
+
+class StatusCodeAsyncClient:
+    def __init__(self, *, status_code: int) -> None:
+        self.status_code = status_code
+
+    async def get(self, url: str, params: dict[str, str] | None = None) -> httpx.Response:
+        request = httpx.Request("GET", url)
+        return httpx.Response(self.status_code, json={}, request=request)
 
 
 class FakeWs:

@@ -137,9 +137,19 @@ class PolymarketIndexer(VenueIndexer):
 
         if not market.token_id_yes:
             return
-        payload = await self._request_json(
-            f"{self.base_url}/book", params={"token_id": market.token_id_yes}
-        )
+        try:
+            payload = await self._request_json(
+                f"{self.base_url}/book", params={"token_id": market.token_id_yes}
+            )
+        except httpx.HTTPStatusError as exc:
+            self._stats.errors_since_heartbeat += 1
+            self._logger.warning(
+                "polymarket_book_refresh_skipped",
+                market_id=market.market_id,
+                token_id=market.token_id_yes,
+                status_code=exc.response.status_code,
+            )
+            return
         bids = _levels_from_payload(payload.get("bids") or payload.get("buys") or [])
         asks = _levels_from_payload(payload.get("asks") or payload.get("sells") or [])
         state = self.books.get(market.market_id)

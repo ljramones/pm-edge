@@ -134,9 +134,15 @@ class IndexerRunner:
                 else:
                     rejection_counts[rejection_reason] += 1
             self._tracked_markets[indexer.venue] = tracked
-            metadata_rows = [metadata_record(market, captured_at=captured_at) for market in markets]
             if not self.config.dry_run:
-                await self.writer.add_records(TableName.MARKET_METADATA_SNAPSHOTS, metadata_rows)
+                for chunk in _chunks(markets, 1_000):
+                    metadata_rows = [
+                        metadata_record(market, captured_at=captured_at) for market in chunk
+                    ]
+                    await self.writer.add_records(
+                        TableName.MARKET_METADATA_SNAPSHOTS, metadata_rows
+                    )
+                await self.writer.flush()
             self._logger.info(
                 "forward_indexer_discovery",
                 venue=indexer.venue,
@@ -278,6 +284,10 @@ def metadata_record(market: MarketDescriptor, *, captured_at: datetime) -> dict[
         "end_date": market.end_date,
         "raw_json": json.dumps(market.raw, default=str, sort_keys=True),
     }
+
+
+def _chunks(markets: list[MarketDescriptor], size: int) -> list[list[MarketDescriptor]]:
+    return [markets[index : index + size] for index in range(0, len(markets), size)]
 
 
 def current_memory_mb() -> float:
