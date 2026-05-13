@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import os
 import signal
+import subprocess
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -156,6 +159,9 @@ class IndexerRunner:
                 filter_rejection_reasons=rejection_counts,
                 **rejection_counts,
             )
+            markets.clear()
+        del discovered
+        gc.collect()
 
     async def emit_once(self) -> int:
         """Emit one snapshot batch from current in-memory book state."""
@@ -212,10 +218,11 @@ class IndexerRunner:
     async def _emit_loop(self) -> None:
         while not self._stop.is_set():
             await self.emit_once()
-            if current_memory_mb() > self.config.max_memory_mb:
+            memory_mb = current_memory_mb()
+            if memory_mb > self.config.max_memory_mb:
                 self._logger.warning(
                     "forward_indexer_memory_ceiling_exceeded",
-                    memory_mb=current_memory_mb(),
+                    memory_mb=memory_mb,
                     max_memory_mb=self.config.max_memory_mb,
                 )
                 await self.writer.flush()
@@ -310,7 +317,17 @@ def _chunks(markets: list[MarketDescriptor], size: int) -> list[list[MarketDescr
 
 
 def current_memory_mb() -> float:
-    """Return current process RSS-ish memory in MB using stdlib resource."""
+    """Return current process RSS memory in MB."""
+
+    try:
+        output = subprocess.check_output(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return int(output.strip()) / 1024
+    except Exception:
+        pass
 
     try:
         import resource

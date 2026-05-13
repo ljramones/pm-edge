@@ -21,7 +21,12 @@ from data.forward_indexer.filters import (
 )
 from data.forward_indexer.kalshi import KalshiIndexer
 from data.forward_indexer.polymarket import PolymarketIndexer
-from data.forward_indexer.runner import IndexerRunner, RunnerConfig, ranked_markets
+from data.forward_indexer.runner import (
+    IndexerRunner,
+    RunnerConfig,
+    current_memory_mb,
+    ranked_markets,
+)
 from data.forward_indexer.schemas import (
     SCHEMA_VERSION,
     market_metadata_snapshot_schema,
@@ -267,6 +272,15 @@ def test_ranked_markets_prefers_higher_volume_then_liquidity_then_tighter_spread
     ]
 
     assert [market.market_id for market in ranked_markets(markets)] == ["tight", "wide", "low"]
+
+
+def test_current_memory_mb_uses_current_rss_from_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "data.forward_indexer.runner.subprocess.check_output",
+        lambda *_args, **_kwargs: "204800\n",
+    )
+
+    assert current_memory_mb() == 200.0
 
 
 @pytest.mark.asyncio
