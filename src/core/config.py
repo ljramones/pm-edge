@@ -6,8 +6,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, computed_field
+from pydantic import AliasChoices, Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from utils.paths import resolve_repo_path
 
 
 class Settings(BaseSettings):
@@ -42,6 +44,7 @@ class Settings(BaseSettings):
     polymarket_api_secret: SecretStr | None = None
     polymarket_api_passphrase: SecretStr | None = None
     polymarket_base_url: str = "https://clob.polymarket.com"
+    polymarket_chain_id: int = 137
 
     kalshi_api_key: SecretStr | None = None
     kalshi_api_secret: SecretStr | None = None
@@ -52,8 +55,37 @@ class Settings(BaseSettings):
     gdelt_base_url: str = "https://api.gdeltproject.org/api/v2/doc/doc"
 
     use_advanced_features: bool = False
-    llm_provider: Literal["openai", "claude", "grok"] = "openai"
+    llm_provider: Literal["ollama", "openai", "claude", "grok"] = "ollama"
     llm_model: str | None = None
+    llm_fallback_provider: Literal["openai", "claude", "grok"] = "openai"
+    llm_fallback_model: str | None = None
+    ollama_host: str = Field(
+        default="http://localhost:11434",
+        validation_alias=AliasChoices("PM_EDGE_OLLAMA_HOST", "OLLAMA_HOST"),
+    )
+    ollama_model: str = Field(
+        default="qwen2.5:32b",
+        validation_alias=AliasChoices(
+            "PM_EDGE_OLLAMA_DEFAULT_MODEL",
+            "PM_EDGE_OLLAMA_MODEL",
+            "OLLAMA_DEFAULT_MODEL",
+            "OLLAMA_MODEL",
+        ),
+    )
+    ollama_fallback_model: str = Field(
+        default="llama3.3:70b",
+        validation_alias=AliasChoices("PM_EDGE_OLLAMA_FALLBACK_MODEL", "OLLAMA_FALLBACK_MODEL"),
+    )
+    high_value_fallback: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("PM_EDGE_HIGH_VALUE_FALLBACK", "HIGH_VALUE_FALLBACK"),
+    )
+    llm_fallback_threshold: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("PM_EDGE_LLM_FALLBACK_THRESHOLD", "LLM_FALLBACK_THRESHOLD"),
+    )
     llm_cache_dir: Path = Path("data/processed/llm_cache")
     llm_max_requests_per_minute: int = Field(default=20, ge=1)
     llm_max_batch_cost_usd: float = Field(default=5.0, ge=0.0)
@@ -96,6 +128,25 @@ class Settings(BaseSettings):
     quarter_kelly: bool = False
     min_post_cost_edge: float = Field(default=0.05, ge=0.0)
     liquidity_harvest_mode: bool = False
+
+    @model_validator(mode="after")
+    def resolve_relative_paths(self) -> Settings:
+        """Resolve project data paths from repo root to avoid cwd-dependent writes."""
+
+        path_fields = [
+            "data_dir",
+            "raw_data_dir",
+            "processed_data_dir",
+            "llm_cache_dir",
+            "paper_trader_state_path",
+            "paper_trader_audit_log_path",
+            "paper_trader_review_flag_path",
+        ]
+        for field_name in path_fields:
+            resolved = resolve_repo_path(getattr(self, field_name))
+            if resolved is not None:
+                setattr(self, field_name, resolved)
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -19,7 +19,7 @@ from data.llm_news_processor import LLMProvider
 from data.onchain_processor import infer_asset_symbol
 from features import FeatureStore
 from strategies import EdgeDetector
-from utils import configure_logging, get_logger
+from utils import configure_logging, get_logger, resolve_repo_path
 
 logger = get_logger(__name__)
 
@@ -81,9 +81,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--llm-provider",
-        choices=["openai", "claude", "grok"],
+        choices=["ollama", "openai", "claude", "grok"],
         default=None,
         help="LLM provider for advanced news summaries.",
+    )
+    parser.add_argument(
+        "--ollama",
+        action="store_true",
+        help="Use local Ollama for LLM news summaries.",
+    )
+    parser.add_argument(
+        "--ollama-model",
+        default=None,
+        help="Override the default local Ollama model for this signal-generation run.",
     )
     parser.add_argument("--articles-per-market", type=int, default=6)
     parser.add_argument(
@@ -100,7 +110,12 @@ def parse_args() -> argparse.Namespace:
 
 async def run() -> int:
     args = parse_args()
+    args.output = resolve_repo_path(args.output)
+    args.resolved_markets = resolve_repo_path(args.resolved_markets)
+    args.price_history = resolve_repo_path(args.price_history)
     settings = get_settings()
+    if args.ollama_model:
+        settings = settings.model_copy(update={"ollama_model": args.ollama_model})
     configure_logging(level=settings.log_level, json_logs=settings.log_json)
 
     output = coerce_single_file_output(args.output)
@@ -143,7 +158,10 @@ async def run() -> int:
         return 0
 
     venues = [Venue(value) for value in args.venue] if args.venue else None
-    llm_provider = cast(LLMProvider, args.llm_provider or settings.llm_provider)
+    llm_provider = cast(
+        LLMProvider,
+        "ollama" if args.ollama else args.llm_provider or settings.llm_provider,
+    )
     news_engine = NewsSentimentEngine(settings=settings) if args.use_llm else None
     llm_processor = LLMNewsProcessor(settings=settings) if args.use_llm else None
     onchain_processor = OnChainProcessor(settings=settings) if args.use_onchain else None
@@ -170,8 +188,8 @@ async def run() -> int:
                     markets = [
                         market
                         for market in markets
-                        if float(market.raw.get("volume", market.raw.get("liquidity", 0)) or 0)
-                        >= args.min_volume
+                        if market_volume_or_none(market) is None
+                        or float(market_volume_or_none(market) or 0) >= args.min_volume
                     ]
                 if args.crypto_only:
                     markets = [
@@ -309,6 +327,17 @@ async def build_advanced_context(
             market, as_of=as_of
         )
     return context
+
+
+def market_volume_or_none(market: UnifiedMarket) -> float | None:
+    """Return available volume/liquidity, or None when the backend omitted it."""
+
+    value = market.raw.get("volume")
+    if value is None:
+        value = market.raw.get("liquidity")
+    if value is None:
+        return None
+    return float(value or 0.0)
 
 
 def iter_timestamps(start: str, end: str, interval_hours: int) -> list[datetime]:

@@ -38,7 +38,7 @@ Current committed milestone line:
 - **Configuration:** Pydantic v2 + pydantic-settings + `.env`
 - **Reliability:** tenacity retries, typed client boundaries, easy-to-mock adapters
 - **Logging:** loguru + structlog with contextual structured logs
-- **Advanced features:** cached LLM news summaries via direct OpenAI/Claude/Grok APIs and crypto on-chain hooks via public HTTP APIs
+- **Advanced features:** cached LLM news summaries via local Ollama by default, with OpenAI/Claude/Grok fallbacks, plus crypto on-chain hooks via public HTTP APIs
 - **Live monitoring:** paper-only trader loop, persisted audit logs, Streamlit dashboard, optional webhook/Telegram/Discord alerts
 - **Telegram alerts:** optional async Telegram notifier with review buttons, liquidity alerts, degradation alerts, and daily summaries
 - **Deep analysis:** base-vs-advanced backtest comparisons, calibration, edge decay, regimes, category cuts, failure cases, report generation
@@ -294,8 +294,8 @@ python -m scripts.generate_signals --start-date 2025-03-01 --end-date 2025-05-01
 # Backfill public Polymarket resolved markets and optional CLOB price history
 python -m scripts.backfill_polymarket --tag crypto --resolved-only --fetch-history
 
-# Generate signals with advanced feature groups
-python -m scripts.generate_signals --start-date 2025-03-01 --end-date 2025-05-01 --use-llm --use-onchain --llm-provider openai
+# Generate signals with advanced feature groups using local Ollama
+python -m scripts.generate_signals --start-date 2025-03-01 --end-date 2025-05-01 --use-llm --use-onchain --ollama-model qwen2.5:32b
 
 # Run portfolio-level Kelly backtest
 python -m scripts.backtest --portfolio --kelly-fraction 0.4 --max-exposure 0.2 --signals data/processed/signals.parquet
@@ -362,7 +362,7 @@ Rank markets by Phase 1 edge score:
 python -m scripts.edge --venue polymarket --limit 10
 ```
 
-Configuration is loaded from `.env` using the `PM_EDGE_` prefix. Local development defaults to SQLite at `data/pm_edge.db`; set `PM_EDGE_DATABASE_URL` to a Postgres URL for deployed environments. Advanced LLM features are off unless enabled by CLI flag or `PM_EDGE_USE_ADVANCED_FEATURES=true`; cached prompt/response audit files are written under `PM_EDGE_LLM_CACHE_DIR`.
+Configuration is loaded from `.env` using the `PM_EDGE_` prefix. Local development defaults to SQLite at `data/pm_edge.db`; set `PM_EDGE_DATABASE_URL` to a Postgres URL for deployed environments. Advanced LLM features are off unless enabled by CLI flag or `PM_EDGE_USE_ADVANCED_FEATURES=true`; cached prompt/response audit files are written under `PM_EDGE_LLM_CACHE_DIR`. LLM news processing defaults to local Ollama (`PM_EDGE_LLM_PROVIDER=ollama`, `PM_EDGE_OLLAMA_HOST=http://localhost:11434`, `PM_EDGE_OLLAMA_DEFAULT_MODEL=qwen2.5:32b`). Complex/high-value local calls can route to `PM_EDGE_OLLAMA_FALLBACK_MODEL=llama3.3:70b`; set `PM_EDGE_LLM_FALLBACK_PROVIDER=openai|claude|grok` and the matching API key for remote fallback if Ollama is unavailable.
 
 Paper trading state defaults to `data/processed/live_paper/state.json` and audit decisions default to `data/processed/live_paper/audit.jsonl`. Review mode is on by default; for large edges, approve a decision by writing the market id or `approve_all` to `data/processed/live_paper/review_approval.txt`.
 

@@ -48,7 +48,7 @@ class PaperTraderConfig(BaseModel):
     use_advanced_features: bool = False
     use_llm: bool = False
     use_onchain: bool = False
-    llm_provider: LLMProvider = "openai"
+    llm_provider: LLMProvider = "ollama"
     articles_per_market: int = Field(default=6, ge=0)
     crypto_only: bool = False
 

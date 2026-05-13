@@ -12,7 +12,7 @@ from core import get_settings
 from monitoring import TelegramNotifier
 from scripts.deep_backtest import load_signal_frame
 from strategies import LiquidityProvider, LiquidityProviderConfig, backtest_liquidity
-from utils import configure_logging
+from utils import configure_logging, resolve_repo_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +31,9 @@ def parse_args() -> argparse.Namespace:
 
 async def run() -> int:
     args = parse_args()
+    if args.signals is not None:
+        args.signals = resolve_repo_path(args.signals)
+    args.output = resolve_repo_path(args.output)
     settings = get_settings()
     configure_logging(level=settings.log_level, json_logs=settings.log_json)
     frame = load_signal_frame(args.signals, demo=args.demo or args.signals is None)

@@ -34,9 +34,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crypto-only", action="store_true")
     parser.add_argument(
         "--llm-provider",
-        choices=["openai", "claude", "grok"],
+        choices=["ollama", "openai", "claude", "grok"],
         default=None,
     )
+    parser.add_argument("--ollama", action="store_true", help="Use local Ollama for LLM features.")
     parser.add_argument("--articles-per-market", type=int, default=6)
     parser.add_argument(
         "--once",
@@ -78,7 +79,10 @@ async def run() -> int:
         use_llm=args.use_llm,
         use_onchain=args.use_onchain,
         crypto_only=args.crypto_only,
-        llm_provider=cast(LLMProvider, args.llm_provider or settings.llm_provider),
+        llm_provider=cast(
+            LLMProvider,
+            "ollama" if args.ollama else args.llm_provider or settings.llm_provider,
+        ),
         articles_per_market=args.articles_per_market,
     )
     trader = PaperTrader(config=config, settings=settings)

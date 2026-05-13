@@ -9,6 +9,8 @@ from typing import Any, cast
 
 import pandas as pd
 
+from utils import resolve_repo_path
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a deep-backtest report.")
@@ -19,6 +21,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.input = resolve_repo_path(args.input)
+    if args.output is not None:
+        args.output = resolve_repo_path(args.output)
     run_dir = resolve_run_dir(args.input)
     output = args.output or (run_dir / "report.md")
     chart_path = run_dir / "analysis" / "equity_curves.svg"

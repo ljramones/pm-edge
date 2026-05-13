@@ -282,6 +282,7 @@ class PredictionMarketClient:
             class_names=("AsyncClient", "ClobClient", "Client", "PolymarketClient"),
             kwargs={
                 "host": self.settings.polymarket_base_url,
+                "chain_id": self.settings.polymarket_chain_id,
                 "key": self.settings.polymarket_api_key,
             },
         )
@@ -344,18 +345,30 @@ class PredictionMarketClient:
         backend: Any,
         venues: Sequence[Venue],
     ) -> list[UnifiedMarket]:
+        market_methods = (
+            (
+                "fetch_markets",
+                "list_markets",
+                "get_sampling_markets",
+                "get_markets",
+                "markets",
+            )
+            if backend_name == "polymarket"
+            else ("fetch_markets", "list_markets", "get_markets", "markets")
+        )
         raw = await self._call_first_available(
             backend,
-            ("fetch_markets", "list_markets", "get_markets", "markets"),
+            market_methods,
             venues=[venue.value for venue in venues],
         )
         if raw is None:
             return []
 
-        return [
+        markets = [
             self._normalize_market(item, default_venue=self._venue_from_backend_name(backend_name))
-            for item in raw
+            for item in self._market_items(raw)
         ]
+        return [market for market in markets if self._is_usable_market(market)]
 
     async def _call_first_available(
         self,
@@ -393,20 +406,83 @@ class PredictionMarketClient:
     def _normalize_market(self, raw: Any, default_venue: Venue) -> UnifiedMarket:
         data = self._as_dict(raw)
         venue = self._coerce_venue(data.get("venue") or data.get("exchange"), default_venue)
-        market_id = str(data.get("market_id") or data.get("id") or data.get("ticker") or "")
+        market_id = str(
+            data.get("market_id")
+            or data.get("id")
+            or data.get("ticker")
+            or data.get("token_id")
+            or self._primary_token_id(data)
+            or data.get("condition_id")
+            or ""
+        )
         title = str(data.get("title") or data.get("question") or data.get("name") or market_id)
-        outcomes = data.get("outcomes") or data.get("tokens") or []
+        outcomes = self._outcome_names(data.get("outcomes") or data.get("tokens") or [])
 
         return UnifiedMarket(
             venue=venue,
             market_id=market_id,
             title=title,
-            outcomes=[str(item) for item in outcomes],
+            outcomes=outcomes,
             url=data.get("url"),
-            status=data.get("status"),
+            status=data.get("status") or self._status_from_market_payload(data),
             closes_at=data.get("closes_at") or data.get("close_time") or data.get("expiration"),
             raw=data,
         )
+
+    def _is_usable_market(self, market: UnifiedMarket) -> bool:
+        if not market.market_id or not market.title:
+            return False
+        raw = market.raw
+        if raw.get("closed") is True or raw.get("archived") is True:
+            return False
+        if raw.get("active") is False:
+            return False
+        if raw.get("accepting_orders") is False:
+            return False
+        return raw.get("enable_order_book") is not False
+
+    def _primary_token_id(self, data: dict[str, Any]) -> str | None:
+        tokens = data.get("tokens")
+        if not isinstance(tokens, list):
+            return None
+        for token in tokens:
+            if isinstance(token, dict) and token.get("token_id"):
+                return str(token["token_id"])
+        return None
+
+    def _outcome_names(self, outcomes: Any) -> list[str]:
+        names: list[str] = []
+        for item in outcomes or []:
+            if isinstance(item, dict):
+                names.append(
+                    str(item.get("outcome") or item.get("name") or item.get("label") or "")
+                )
+            else:
+                names.append(str(item))
+        return [name for name in names if name]
+
+    def _status_from_market_payload(self, data: dict[str, Any]) -> str | None:
+        if data.get("closed") is True:
+            return "closed"
+        if data.get("active") is False:
+            return "inactive"
+        if data.get("accepting_orders") is False:
+            return "not_accepting_orders"
+        return "open"
+
+    def _market_items(self, raw: Any) -> list[Any]:
+        """Return market records from common SDK/API response envelopes."""
+
+        if raw is None:
+            return []
+        if isinstance(raw, list | tuple):
+            return list(raw)
+        data = self._as_dict(raw)
+        for key in ("data", "markets", "results"):
+            value = data.get(key)
+            if isinstance(value, list | tuple):
+                return list(value)
+        return [raw] if data else []
 
     def _normalize_order_book(self, market_id: str, raw: Any) -> OrderBook:
         data = self._as_dict(raw)

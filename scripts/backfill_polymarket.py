@@ -16,10 +16,12 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
+from utils import resolve_repo_path
+
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 CLOB_BASE_URL = "https://clob.polymarket.com"
-RAW_DIR = Path("data/raw/polymarket")
-PROCESSED_DIR = Path("data/processed")
+RAW_DIR = resolve_repo_path(Path("data/raw/polymarket"))
+PROCESSED_DIR = resolve_repo_path(Path("data/processed"))
 RESOLVED_PARQUET = PROCESSED_DIR / "resolved_markets.parquet"
 PRICE_HISTORY_PARQUET = PROCESSED_DIR / "polymarket_price_history.parquet"
 
@@ -365,8 +367,8 @@ async def run() -> int:
         resolved_only=args.resolved_only,
         limit=args.limit,
         fetch_history=args.fetch_history,
-        raw_dir=args.raw_dir,
-        processed_dir=args.processed_dir,
+        raw_dir=resolve_repo_path(args.raw_dir),
+        processed_dir=resolve_repo_path(args.processed_dir),
         page_size=args.page_size,
         request_delay=args.request_delay,
         history_interval=args.history_interval,

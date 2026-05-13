@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import re
 from datetime import datetime
@@ -25,7 +26,8 @@ from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-LLMProvider = Literal["openai", "claude", "grok"]
+LLMProvider = Literal["ollama", "openai", "claude", "grok"]
+FrontierLLMProvider = Literal["openai", "claude", "grok"]
 
 
 class LLMCostEstimate(BaseModel):
@@ -96,12 +98,18 @@ class LLMNewsProcessor:
         articles: list[NewsArticle],
         provider: LLMProvider | None = None,
         as_of: datetime | None = None,
+        high_value: bool = False,
     ) -> LLMNewsSummary:
         """Return a structured news summary for a market/article batch."""
 
         anchor = as_of or utc_now()
         selected_provider = provider or self.settings.llm_provider
-        model = self._model_for(selected_provider)
+        high_value_call = high_value or self._is_high_value_call(
+            provider=selected_provider,
+            market_title=market_title,
+            articles=articles,
+        )
+        model = self._model_for(selected_provider, high_value=high_value_call)
         prompt = self._build_prompt(market_title, articles, anchor)
         prompt_hash = _hash_text(prompt)
         cache_path = self._cache_path(market_id, selected_provider, model, articles, prompt_hash)
@@ -115,7 +123,7 @@ class LLMNewsProcessor:
             model=model,
             completion_tokens=650,
         )
-        if self._api_key(selected_provider) is None:
+        if not self.has_credentials(selected_provider):
             summary = self._fallback_summary(
                 market_id=market_id,
                 market_title=market_title,
@@ -128,15 +136,130 @@ class LLMNewsProcessor:
             return summary
 
         await self._respect_rate_limit()
+        used_provider = selected_provider
+        used_model = model
+        used_cost = cost
+        fallback_used = (
+            selected_provider == "ollama" and model == self.settings.ollama_fallback_model
+        )
+        if fallback_used:
+            logger.info(
+                "llm_news_summary_high_value_ollama_model",
+                market_id=market_id,
+                provider=selected_provider,
+                model=model,
+                fallback_threshold=self.settings.llm_fallback_threshold,
+            )
         try:
-            raw_text = await self._call_provider(selected_provider, model, prompt)
+            raw_text = await self._call_provider(used_provider, used_model, prompt)
+        except Exception as exc:
+            raw_text = None
+            if (
+                selected_provider == "ollama"
+                and used_provider == "ollama"
+                and used_model != self.settings.ollama_fallback_model
+                and self.settings.high_value_fallback
+            ):
+                logger.warning(
+                    "llm_news_summary_local_fallback",
+                    market_id=market_id,
+                    provider=selected_provider,
+                    model=used_model,
+                    fallback_model=self.settings.ollama_fallback_model,
+                    error=str(exc),
+                )
+                await self._respect_rate_limit()
+                try:
+                    raw_text = await self._call_provider(
+                        "ollama", self.settings.ollama_fallback_model, prompt
+                    )
+                    used_model = self.settings.ollama_fallback_model
+                    used_cost = estimate_llm_cost(
+                        prompt,
+                        provider="ollama",
+                        model=used_model,
+                        completion_tokens=650,
+                    )
+                    fallback_used = True
+                except Exception as local_fallback_exc:
+                    logger.warning(
+                        "llm_news_summary_local_fallback_failed",
+                        market_id=market_id,
+                        provider=selected_provider,
+                        fallback_model=self.settings.ollama_fallback_model,
+                        error=str(local_fallback_exc),
+                    )
+
+            if (
+                raw_text is None
+                and used_provider == selected_provider
+                and self._should_try_frontier_fallback(selected_provider, model)
+            ):
+                fallback_provider = self.settings.llm_fallback_provider
+                fallback_model = self._model_for(fallback_provider)
+                if self.has_credentials(fallback_provider):
+                    logger.warning(
+                        "llm_news_summary_frontier_fallback",
+                        market_id=market_id,
+                        provider=selected_provider,
+                        model=model,
+                        fallback_provider=fallback_provider,
+                        fallback_model=fallback_model,
+                        error=str(exc),
+                    )
+                    await self._respect_rate_limit()
+                    try:
+                        raw_text = await self._call_provider(
+                            fallback_provider, fallback_model, prompt
+                        )
+                        used_provider = fallback_provider
+                        used_model = fallback_model
+                        used_cost = estimate_llm_cost(
+                            prompt,
+                            provider=used_provider,
+                            model=used_model,
+                            completion_tokens=650,
+                        )
+                        fallback_used = True
+                    except Exception as fallback_exc:
+                        logger.warning(
+                            "llm_news_summary_frontier_fallback_failed",
+                            market_id=market_id,
+                            provider=selected_provider,
+                            fallback_provider=fallback_provider,
+                            error=str(fallback_exc),
+                        )
+                        raw_text = None
+                else:
+                    raw_text = None
+
+            if raw_text is None:
+                logger.warning(
+                    "llm_news_summary_failed",
+                    market_id=market_id,
+                    provider=selected_provider,
+                    error=str(exc),
+                )
+                summary = self._fallback_summary(
+                    market_id=market_id,
+                    market_title=market_title,
+                    articles=articles,
+                    as_of=anchor,
+                    prompt_hash=prompt_hash,
+                    cost=cost,
+                )
+                self._write_cache(cache_path, summary, prompt=prompt, raw_response=None)
+                return summary
+
+        try:
+            assert raw_text is not None
             parsed = _parse_json_object(raw_text)
             summary = LLMNewsSummary(
                 market_id=market_id,
                 market_title=market_title,
                 as_of=anchor,
-                provider=selected_provider,
-                model=model,
+                provider=used_provider,
+                model=used_model,
                 article_count=len(articles),
                 key_events=[str(item) for item in parsed.get("key_events", [])][:8],
                 sentiment=_bounded_float(parsed.get("sentiment"), -1.0, 1.0, 0.0),
@@ -145,18 +268,20 @@ class LLMNewsProcessor:
                 probability_signal=_bounded_float(parsed.get("probability_signal"), 0.0, 1.0, 0.5),
                 impact=str(parsed.get("impact") or "neutral"),
                 reasoning=str(parsed.get("reasoning") or ""),
+                fallback_used=fallback_used,
                 prompt_hash=prompt_hash,
                 response_hash=_hash_text(raw_text),
-                cost_estimate=cost,
+                cost_estimate=used_cost,
             )
             self._write_cache(cache_path, summary, prompt=prompt, raw_response=raw_text)
             logger.info(
                 "llm_news_summary_generated",
                 market_id=market_id,
-                provider=selected_provider,
-                model=model,
+                provider=used_provider,
+                model=used_model,
+                requested_provider=selected_provider,
                 article_count=len(articles),
-                estimated_cost_usd=cost.estimated_cost_usd,
+                estimated_cost_usd=used_cost.estimated_cost_usd,
                 prompt_hash=prompt_hash,
             )
             return summary
@@ -218,11 +343,17 @@ class LLMNewsProcessor:
         )
 
     def has_credentials(self, provider: LLMProvider | None = None) -> bool:
-        """Return whether the selected provider has an API key configured."""
+        """Return whether the selected provider can be attempted."""
 
-        return self._api_key(provider or self.settings.llm_provider) is not None
+        selected = provider or self.settings.llm_provider
+        if selected == "ollama":
+            return True
+        return self._api_key(selected) is not None
 
     async def _call_provider(self, provider: LLMProvider, model: str, prompt: str) -> str:
+        if provider == "ollama":
+            return await self._call_ollama(model, prompt)
+
         if provider == "claude":
             response = await self.http_client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -266,6 +397,31 @@ class LLMNewsProcessor:
         response.raise_for_status()
         payload = response.json()
         return str(payload["choices"][0]["message"]["content"])
+
+    async def _call_ollama(self, model: str, prompt: str) -> str:
+        try:
+            ollama = importlib.import_module("ollama")
+        except ImportError as exc:
+            raise RuntimeError(
+                "The ollama package is not installed. Run `pip install -e .` or install ollama."
+            ) from exc
+
+        client = ollama.AsyncClient(host=self.settings.ollama_host)
+        response = await client.chat(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Return only valid compact JSON for prediction-market research.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.1},
+        )
+        message = response.get("message", {}) if isinstance(response, dict) else response.message
+        if isinstance(message, dict):
+            return str(message.get("content", ""))
+        return str(getattr(message, "content", ""))
 
     async def _respect_rate_limit(self) -> None:
         now = asyncio.get_running_loop().time()
@@ -333,7 +489,7 @@ class LLMNewsProcessor:
             + "\n".join(article_lines)
         )
 
-    def _api_key(self, provider: LLMProvider) -> str | None:
+    def _api_key(self, provider: FrontierLLMProvider) -> str | None:
         key = {
             "openai": self.settings.openai_api_key,
             "claude": self.settings.anthropic_api_key,
@@ -341,14 +497,41 @@ class LLMNewsProcessor:
         }[provider]
         return key.get_secret_value() if key is not None else None
 
-    def _model_for(self, provider: LLMProvider) -> str:
+    def _model_for(self, provider: LLMProvider, *, high_value: bool = False) -> str:
         if self.settings.llm_model:
             return self.settings.llm_model
+        if provider == "ollama":
+            if high_value and self.settings.high_value_fallback:
+                return self.settings.ollama_fallback_model
+            return self.settings.ollama_model
+        if self.settings.llm_fallback_model and provider == self.settings.llm_fallback_provider:
+            return self.settings.llm_fallback_model
         return {
             "openai": "gpt-4o-mini",
             "claude": "claude-3-5-haiku-latest",
             "grok": "grok-3-mini",
         }[provider]
+
+    def _should_try_frontier_fallback(self, provider: LLMProvider, model: str) -> bool:
+        return provider == "ollama" and self.settings.high_value_fallback
+
+    def _is_high_value_call(
+        self,
+        *,
+        provider: LLMProvider,
+        market_title: str,
+        articles: list[NewsArticle],
+    ) -> bool:
+        if provider != "ollama" or not self.settings.high_value_fallback:
+            return False
+        article_chars = sum(len(article.text) for article in articles)
+        complexity = min(
+            1.0,
+            (min(len(articles), 12) / 12.0) * 0.45
+            + (min(len(market_title), 180) / 180.0) * 0.20
+            + (min(article_chars, 7_500) / 7_500.0) * 0.35,
+        )
+        return complexity >= self.settings.llm_fallback_threshold
 
     def _cache_path(
         self,
@@ -402,6 +585,7 @@ def estimate_llm_cost(
 
     prompt_tokens = max(1, len(prompt) // 4)
     input_per_million, output_per_million = {
+        "ollama": (0.0, 0.0),
         "openai": (0.15, 0.60),
         "claude": (0.80, 4.00),
         "grok": (0.30, 0.50),

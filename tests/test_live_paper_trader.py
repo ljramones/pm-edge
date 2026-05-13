@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,7 +36,7 @@ class FakeDetector:
 
 
 @pytest.mark.asyncio
-async def test_paper_trader_run_once_persists_target_position(tmp_path) -> None:
+async def test_paper_trader_run_once_persists_target_position(tmp_path: Path) -> None:
     market = UnifiedMarket(
         venue=Venue.POLYMARKET,
         market_id="m-1",
@@ -75,7 +76,7 @@ async def test_paper_trader_run_once_persists_target_position(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_paper_trader_review_timeout_blocks_unapproved_trade(tmp_path) -> None:
+async def test_paper_trader_review_timeout_blocks_unapproved_trade(tmp_path: Path) -> None:
     market = UnifiedMarket(
         venue=Venue.KALSHI,
         market_id="m-2",

@@ -15,10 +15,13 @@ from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+AiogramBot: Any | None = None
 try:  # Optional runtime dependency; HTTP fallback below keeps local tests lightweight.
-    from aiogram import Bot as AiogramBot
+    from aiogram import Bot as _AiogramBot
 except ImportError:  # pragma: no cover - exercised when aiogram is not installed.
-    AiogramBot = None  # type: ignore[assignment]
+    pass
+else:
+    AiogramBot = _AiogramBot
 
 
 class TelegramButton(BaseModel):

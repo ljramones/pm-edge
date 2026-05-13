@@ -29,7 +29,7 @@ from features import FearLayerRouter, FearSnapshot
 from monitoring import TelegramNotifier
 from scripts.backtest import demo_signals, parse_period
 from strategies import backtest_liquidity
-from utils import configure_logging, get_logger
+from utils import configure_logging, get_logger, resolve_repo_path
 
 logger = get_logger(__name__)
 
@@ -85,6 +85,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.signals is not None:
+        args.signals = resolve_repo_path(args.signals)
+    args.output = resolve_repo_path(args.output)
     settings = get_settings()
     configure_logging(level=settings.log_level, json_logs=settings.log_json)
     period_start, period_end = normalize_period(*parse_period(args.period))
@@ -199,6 +202,7 @@ def execute_run(
     """Execute one deep-backtest variant and persist its outputs."""
 
     run_signals = prepare_signals_for_variant(signals, use_advanced=spec.use_advanced_features)
+    include_lookahead_pnl = bool(getattr(args, "include_lookahead_pnl", False))
     config = BacktestConfig(
         strategy_name=f"{args.strategy}_{spec.name}",
         edge_threshold=args.edge_threshold,
@@ -208,7 +212,7 @@ def execute_run(
             kalshi_fee_bps=args.kalshi_fee_bps,
             slippage_bps=args.slippage_bps,
         ),
-        exclude_lookahead=not args.include_lookahead_pnl,
+        exclude_lookahead=not include_lookahead_pnl,
         save_results=False,
     )
     output_dir = run_dir / "runs" / spec.name
@@ -254,7 +258,7 @@ def execute_run(
         if getattr(args, "mode", "directional") in {"liquidity-harvest", "hybrid"}:
             liquidity_signals = (
                 run_signals
-                if args.include_lookahead_pnl or "is_lookahead" not in run_signals
+                if include_lookahead_pnl or "is_lookahead" not in run_signals
                 else run_signals[~run_signals["is_lookahead"].fillna(False).astype(bool)]
             )
             liquidity = backtest_liquidity(liquidity_signals)
