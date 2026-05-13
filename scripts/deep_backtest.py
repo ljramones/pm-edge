@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ignore portfolio liquidity caps and save allocation rejection diagnostics.",
     )
+    parser.add_argument(
+        "--include-lookahead-pnl",
+        action="store_true",
+        help="Allow rows marked is_lookahead=True in PnL simulation. Off by default.",
+    )
     parser.add_argument("--portfolio", action="store_true")
     parser.add_argument("--compare", action="store_true", default=True)
     parser.add_argument("--edge-threshold", type=float, default=0.02)
@@ -203,11 +208,14 @@ def execute_run(
             kalshi_fee_bps=args.kalshi_fee_bps,
             slippage_bps=args.slippage_bps,
         ),
+        exclude_lookahead=not args.include_lookahead_pnl,
         save_results=False,
     )
     output_dir = run_dir / "runs" / spec.name
     output_dir.mkdir(parents=True, exist_ok=True)
     run_signals.to_parquet(output_dir / "signals.parquet", index=False)
+    lookahead_summary = lookahead_signal_summary(run_signals)
+    save_json(output_dir / "lookahead_summary.json", lookahead_summary)
     if spec.portfolio:
         portfolio_config = portfolio_config_from_backtest_config(
             config,
@@ -234,6 +242,7 @@ def execute_run(
         )
         save_json(output_dir / "portfolio_diagnostics.json", portfolio_result.diagnostics)
         metrics = dict(portfolio_result.report.metrics)
+        metrics.update({f"lookahead_{key}": value for key, value in lookahead_summary.items()})
         metrics.update(
             {
                 f"diagnostic_{key}": value
@@ -243,7 +252,12 @@ def execute_run(
         )
         trades_for_artifact = trades
         if getattr(args, "mode", "directional") in {"liquidity-harvest", "hybrid"}:
-            liquidity = backtest_liquidity(run_signals)
+            liquidity_signals = (
+                run_signals
+                if args.include_lookahead_pnl or "is_lookahead" not in run_signals
+                else run_signals[~run_signals["is_lookahead"].fillna(False).astype(bool)]
+            )
+            liquidity = backtest_liquidity(liquidity_signals)
             liquidity.to_parquet(output_dir / "liquidity_trades.parquet", index=False)
             liquidity_pnl = float(liquidity["pnl"].sum()) if not liquidity.empty else 0.0
             metrics["liquidity_pnl"] = liquidity_pnl
@@ -273,7 +287,9 @@ def execute_run(
     )
     bets = backtest_result.bets_frame()
     bets.to_parquet(output_dir / "bets.parquet", index=False)
-    save_json(output_dir / "metrics.json", backtest_result.report.metrics)
+    metrics = dict(backtest_result.report.metrics)
+    metrics.update({f"lookahead_{key}": value for key, value in lookahead_summary.items()})
+    save_json(output_dir / "metrics.json", metrics)
     save_json(output_dir / "rubric.json", backtest_result.rubric.model_dump(mode="json"))
     save_json(
         output_dir / "calibration.json",
@@ -281,11 +297,31 @@ def execute_run(
     )
     return DeepRunArtifact(
         name=spec.name,
-        metrics=backtest_result.report.metrics,
+        metrics=metrics,
         rubric=backtest_result.rubric.model_dump(mode="json"),
         signals=run_signals,
         bets=bets,
     )
+
+
+def lookahead_signal_summary(frame: pd.DataFrame) -> dict[str, float]:
+    """Return lookahead and historical price coverage for a signal frame."""
+
+    rows = float(len(frame))
+    if frame.empty or "is_lookahead" not in frame:
+        return {
+            "rows": rows,
+            "lookahead_rows": 0.0,
+            "historical_price_rows": rows,
+            "lookahead_rate": 0.0,
+        }
+    lookahead = frame["is_lookahead"].fillna(False).astype(bool)
+    return {
+        "rows": rows,
+        "lookahead_rows": float(lookahead.sum()),
+        "historical_price_rows": float((~lookahead).sum()),
+        "lookahead_rate": float(lookahead.mean()) if len(lookahead) else 0.0,
+    }
 
 
 def build_run_specs(args: argparse.Namespace) -> list[DeepRunSpec]:

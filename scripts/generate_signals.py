@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import shutil
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -43,6 +44,23 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/processed/resolved_markets.parquet"),
         help="Resolved-market parquet used by --include-outcomes.",
+    )
+    parser.add_argument(
+        "--use-historical-prices",
+        action="store_true",
+        help="Use CLOB historical prices at/before each as_of timestamp when available.",
+    )
+    parser.add_argument(
+        "--price-history",
+        type=Path,
+        default=Path("data/processed/polymarket_price_history.parquet"),
+        help="Normalized Polymarket CLOB history parquet from scripts.backfill_polymarket.",
+    )
+    parser.add_argument(
+        "--max-price-age-hours",
+        type=float,
+        default=48.0,
+        help="Maximum age of a historical price point before marking the row as lookahead.",
     )
     parser.add_argument(
         "--demo", action="store_true", help="Generate deterministic demo signals without APIs."
@@ -103,6 +121,9 @@ async def run() -> int:
     resolved_markets = (
         load_resolved_markets(args.resolved_markets) if args.include_outcomes else pd.DataFrame()
     )
+    price_history = (
+        load_price_history(args.price_history) if args.use_historical_prices else pd.DataFrame()
+    )
     use_advanced = advanced_features_enabled(args, settings)
     if args.include_outcomes and not resolved_markets.empty:
         write_resolved_market_signals(
@@ -115,6 +136,9 @@ async def run() -> int:
             high_volume_only=args.markets == "high-volume",
             min_volume=args.min_volume,
             include_advanced=use_advanced,
+            price_history=price_history,
+            use_historical_prices=args.use_historical_prices,
+            max_price_age_hours=args.max_price_age_hours,
         )
         return 0
 
@@ -372,7 +396,22 @@ SIGNAL_COLUMNS = [
     "volume",
     "fear_sizing_multiplier",
     "advanced_enabled",
+    "price_source",
+    "is_lookahead",
+    "historical_price_at",
+    "historical_price_age_seconds",
+    "liquidity_source",
 ]
+
+
+@dataclass(frozen=True)
+class HistoricalQuote:
+    """Historical market quote selected for one signal timestamp."""
+
+    price: float
+    timestamp: pd.Timestamp
+    age_seconds: float
+    source: str
 
 
 def build_signal_row(
@@ -416,6 +455,9 @@ def ensure_signal_schema(frame: pd.DataFrame) -> pd.DataFrame:
         if column not in output:
             output[column] = pd.NA
     output["fear_sizing_multiplier"] = output["fear_sizing_multiplier"].fillna(1.0)
+    output["is_lookahead"] = output["is_lookahead"].fillna(False).astype(bool)
+    output["price_source"] = output["price_source"].fillna("unknown")
+    output["liquidity_source"] = output["liquidity_source"].fillna("unknown")
     if (
         "edge" in output
         and output["edge"].isna().all()
@@ -444,6 +486,34 @@ def load_resolved_markets(path: Path) -> pd.DataFrame:
     if frame.empty:
         raise ValueError(f"Resolved market file is empty: {path}")
     return frame
+
+
+def load_price_history(path: Path) -> pd.DataFrame:
+    """Load normalized historical CLOB prices."""
+
+    if not path.exists():
+        logger.warning(
+            "historical_price_file_missing",
+            path=str(path),
+            message="all generated rows will be marked is_lookahead=True",
+        )
+        return pd.DataFrame(
+            columns=["market_id", "token_id", "outcome", "timestamp", "price", "source_file"]
+        )
+    frame = pd.read_parquet(path)
+    if frame.empty:
+        logger.warning(
+            "historical_price_file_empty",
+            path=str(path),
+            message="all generated rows will be marked is_lookahead=True",
+        )
+        return frame
+    frame = frame.copy()
+    frame["market_id"] = frame["market_id"].astype(str)
+    frame["outcome"] = frame["outcome"].astype(str)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+    return frame.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
 
 
 def attach_resolved_outcomes(signals: pd.DataFrame, resolved_markets: pd.DataFrame) -> pd.DataFrame:
@@ -574,6 +644,9 @@ def write_resolved_market_signals(
     high_volume_only: bool,
     min_volume: float,
     include_advanced: bool,
+    price_history: pd.DataFrame | None = None,
+    use_historical_prices: bool = False,
+    max_price_age_hours: float = 48.0,
 ) -> None:
     """Generate historical signal rows from resolved-market backfill data."""
 
@@ -585,7 +658,14 @@ def write_resolved_market_signals(
         if path.exists() and not overwrite:
             continue
         rows = [
-            resolved_signal_row(row, timestamp=timestamp, include_advanced=include_advanced)
+            resolved_signal_row(
+                row,
+                timestamp=timestamp,
+                include_advanced=include_advanced,
+                price_history=price_history,
+                use_historical_prices=use_historical_prices,
+                max_price_age_hours=max_price_age_hours,
+            )
             for row in active_resolved_market_rows(
                 resolved_markets,
                 timestamp=timestamp,
@@ -649,13 +729,32 @@ def active_resolved_market_rows(
 
 
 def resolved_signal_row(
-    row: dict[str, Any], *, timestamp: datetime, include_advanced: bool
+    row: dict[str, Any],
+    *,
+    timestamp: datetime,
+    include_advanced: bool,
+    price_history: pd.DataFrame | None = None,
+    use_historical_prices: bool = False,
+    max_price_age_hours: float = 48.0,
 ) -> dict[str, Any]:
     """Build one backtest signal from a resolved-market row."""
 
-    market_probability = resolved_market_probability(row)
+    historical_quote = (
+        historical_quote_for_row(
+            row,
+            timestamp=timestamp,
+            price_history=price_history,
+            max_price_age_hours=max_price_age_hours,
+        )
+        if use_historical_prices
+        else None
+    )
+    market_probability = (
+        historical_quote.price if historical_quote is not None else resolved_market_probability(row)
+    )
     model_probability = resolved_model_probability(row, market_probability, include_advanced)
     features = resolved_signal_features(row, model_probability=model_probability)
+    is_lookahead = use_historical_prices and historical_quote is None
     output = {
         "market_id": str(row.get("market_id")),
         "question": row.get("question"),
@@ -676,7 +775,11 @@ def resolved_signal_row(
         "volume": numeric_value(row.get("volume_num"), row.get("volume"), default=0.0),
         "fear_sizing_multiplier": 1.0,
         "advanced_enabled": include_advanced,
-        "price_source": "resolved_market_snapshot",
+        "price_source": historical_quote.source if historical_quote else "resolved_market_snapshot",
+        "is_lookahead": is_lookahead,
+        "historical_price_at": historical_quote.timestamp if historical_quote else pd.NaT,
+        "historical_price_age_seconds": historical_quote.age_seconds if historical_quote else pd.NA,
+        "liquidity_source": "resolved_market_snapshot" if not is_lookahead else "missing",
     }
     if include_advanced:
         output["base_model_probability"] = resolved_model_probability(
@@ -684,6 +787,51 @@ def resolved_signal_row(
         )
         output["advanced_model_probability"] = model_probability
     return output
+
+
+def historical_quote_for_row(
+    row: dict[str, Any],
+    *,
+    timestamp: datetime,
+    price_history: pd.DataFrame | None,
+    max_price_age_hours: float,
+) -> HistoricalQuote | None:
+    """Return nearest non-future CLOB Yes price for one market row."""
+
+    if price_history is None or price_history.empty:
+        return None
+    market_id = str(row.get("market_id"))
+    market_history = price_history[price_history["market_id"].astype(str) == market_id].copy()
+    if market_history.empty:
+        return None
+    as_of = pd.Timestamp(timestamp)
+    if as_of.tzinfo is None:
+        as_of = as_of.tz_localize("UTC")
+    market_history = market_history[market_history["timestamp"] <= as_of]
+    if market_history.empty:
+        return None
+    yes_history = market_history[market_history["outcome"].astype(str).str.lower().eq("yes")]
+    no_history = market_history[market_history["outcome"].astype(str).str.lower().eq("no")]
+    if not yes_history.empty:
+        point = yes_history.sort_values("timestamp").iloc[-1]
+        price = float(point["price"])
+        source = "clob_history_yes"
+    elif not no_history.empty:
+        point = no_history.sort_values("timestamp").iloc[-1]
+        price = 1.0 - float(point["price"])
+        source = "clob_history_no_inverted"
+    else:
+        return None
+    price_time = pd.Timestamp(point["timestamp"])
+    age_seconds = float((as_of - price_time).total_seconds())
+    if age_seconds < 0 or age_seconds > max_price_age_hours * 3600:
+        return None
+    return HistoricalQuote(
+        price=min(max(price, 0.001), 0.999),
+        timestamp=price_time,
+        age_seconds=age_seconds,
+        source=source,
+    )
 
 
 def resolved_market_probability(row: dict[str, Any]) -> float:

@@ -28,6 +28,11 @@ env/
 data/*
 data/raw/*
 data/processed/*
+data/backtests/*
+downdata/
+**/data/raw/*
+**/data/processed/*
+**/data/backtests/*
 !data/.gitkeep
 !data/raw/
 !data/raw/.gitkeep

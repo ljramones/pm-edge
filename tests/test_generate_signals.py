@@ -12,6 +12,7 @@ from scripts.generate_signals import (
     iter_timestamps,
     partition_path,
     prepare_single_file_output,
+    resolved_signal_row,
     write_demo_signals,
     write_resolved_market_signals,
 )
@@ -147,6 +148,59 @@ def test_resolved_market_signal_generation_uses_backfill_universe(tmp_path: Path
     assert frame["outcome"].eq(0).all()
     assert frame["advanced_enabled"].all()
     assert "advanced_model_probability" in frame.columns
+
+
+def test_resolved_signal_row_uses_historical_price_when_available() -> None:
+    row = {
+        "market_id": "m1",
+        "question": "Will BTC close above 100k?",
+        "closed_time": "2024-01-10T00:00:00Z",
+        "winning_outcome": "Yes",
+        "last_trade_price": 0.99,
+        "volume_num": 750_000,
+        "liquidity_num": 25_000,
+    }
+    history = pd.DataFrame(
+        {
+            "market_id": ["m1"],
+            "outcome": ["Yes"],
+            "timestamp": [pd.Timestamp("2024-01-01T00:00:00Z")],
+            "price": [0.44],
+        }
+    )
+
+    output = resolved_signal_row(
+        row,
+        timestamp=pd.Timestamp("2024-01-01T06:00:00Z"),
+        include_advanced=False,
+        price_history=history,
+        use_historical_prices=True,
+        max_price_age_hours=12,
+    )
+
+    assert output["market_probability"] == 0.44
+    assert output["price_source"] == "clob_history_yes"
+    assert output["is_lookahead"] is False
+
+
+def test_resolved_signal_row_marks_missing_history_as_lookahead() -> None:
+    output = resolved_signal_row(
+        {
+            "market_id": "m1",
+            "question": "Will BTC close above 100k?",
+            "closed_time": "2024-01-10T00:00:00Z",
+            "winning_outcome": "Yes",
+            "last_trade_price": 0.99,
+        },
+        timestamp=pd.Timestamp("2024-01-01T06:00:00Z"),
+        include_advanced=False,
+        price_history=pd.DataFrame(),
+        use_historical_prices=True,
+    )
+
+    assert output["market_probability"] == 0.99
+    assert output["price_source"] == "resolved_market_snapshot"
+    assert output["is_lookahead"] is True
 
 
 def test_resolved_market_active_filter_respects_dates_and_crypto() -> None:

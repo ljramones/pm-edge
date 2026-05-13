@@ -21,6 +21,7 @@ CLOB_BASE_URL = "https://clob.polymarket.com"
 RAW_DIR = Path("data/raw/polymarket")
 PROCESSED_DIR = Path("data/processed")
 RESOLVED_PARQUET = PROCESSED_DIR / "resolved_markets.parquet"
+PRICE_HISTORY_PARQUET = PROCESSED_DIR / "polymarket_price_history.parquet"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class BackfillConfig:
     timeout_seconds: float = 30.0
     history_interval: str = "1d"
     history_fidelity: int = 60
+    history_chunk_days: int = 14
     overwrite: bool = False
 
 
@@ -85,6 +87,14 @@ class PolymarketBackfiller:
 
         if self.config.fetch_history and resolved_markets:
             await self.fetch_price_histories(resolved_markets)
+            history_frame = price_history_frame_from_raw(self.config.raw_dir)
+            history_path_out = self.config.processed_dir / PRICE_HISTORY_PARQUET.name
+            history_frame.to_parquet(history_path_out, index=False)
+            logger.info(
+                "polymarket_price_history_parquet_written",
+                path=str(history_path_out),
+                rows=len(history_frame),
+            )
         return resolved_frame
 
     async def resolve_tag_id(self, tag: str | None) -> int | None:
@@ -173,9 +183,22 @@ class PolymarketBackfiller:
                     "interval": self.config.history_interval,
                     "fidelity": str(self.config.history_fidelity),
                 }
+                start_ts = unix_seconds(
+                    market.get("startDate") or market.get("startDateIso") or market.get("createdAt")
+                )
+                end_ts = unix_seconds(
+                    market.get("closedTime") or market.get("endDate") or market.get("endDateIso")
+                )
+                if start_ts is not None:
+                    params["startTs"] = str(start_ts)
+                if end_ts is not None:
+                    params["endTs"] = str(end_ts)
                 try:
-                    payload = await self.request_json(
-                        f"{CLOB_BASE_URL}/prices-history", params=params
+                    payload = await self.fetch_price_history_payload(
+                        token_id=token_id,
+                        params=params,
+                        start_ts=start_ts,
+                        end_ts=end_ts,
                     )
                 except httpx.HTTPStatusError as exc:
                     logger.warning(
@@ -200,6 +223,59 @@ class PolymarketBackfiller:
                 )
                 await asyncio.sleep(self.config.request_delay)
                 progress.update(1)
+
+    async def fetch_price_history_payload(
+        self,
+        *,
+        token_id: str,
+        params: dict[str, str],
+        start_ts: int | None,
+        end_ts: int | None,
+    ) -> dict[str, Any]:
+        """Fetch CLOB price history, chunking long bounded requests when needed."""
+
+        if start_ts is None or end_ts is None:
+            return cast(
+                dict[str, Any],
+                await self.request_json(f"{CLOB_BASE_URL}/prices-history", params=params),
+            )
+        max_window = self.config.history_chunk_days * 86_400
+        if end_ts - start_ts <= max_window:
+            return cast(
+                dict[str, Any],
+                await self.request_json(f"{CLOB_BASE_URL}/prices-history", params=params),
+            )
+        history: list[dict[str, Any]] = []
+        cursor = start_ts
+        while cursor < end_ts:
+            chunk_end = min(cursor + max_window, end_ts)
+            chunk_params = dict(params)
+            chunk_params["startTs"] = str(cursor)
+            chunk_params["endTs"] = str(chunk_end)
+            try:
+                payload = await self.request_json(
+                    f"{CLOB_BASE_URL}/prices-history", params=chunk_params
+                )
+            except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "polymarket_history_chunk_failed",
+                    token_id=token_id,
+                    start_ts=cursor,
+                    end_ts=chunk_end,
+                    status_code=exc.response.status_code,
+                )
+                cursor = chunk_end
+                continue
+            chunk_history = payload.get("history") if isinstance(payload, dict) else []
+            if isinstance(chunk_history, list):
+                history.extend([item for item in chunk_history if isinstance(item, dict)])
+            cursor = chunk_end
+            await asyncio.sleep(self.config.request_delay)
+        deduped = {
+            str(item.get("t") or item.get("timestamp") or item.get("time")): item
+            for item in history
+        }
+        return {"history": list(deduped.values())}
 
     async def request_json(
         self, url: str, *, params: dict[str, str] | list[tuple[str, str]] | None = None
@@ -275,6 +351,7 @@ def parse_args() -> argparse.Namespace:
         "--history-interval", default="1d", choices=["max", "all", "1m", "1w", "1d", "6h", "1h"]
     )
     parser.add_argument("--history-fidelity", type=int, default=60)
+    parser.add_argument("--history-chunk-days", type=int, default=14)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -294,6 +371,7 @@ async def run() -> int:
         request_delay=args.request_delay,
         history_interval=args.history_interval,
         history_fidelity=args.history_fidelity,
+        history_chunk_days=args.history_chunk_days,
         overwrite=args.overwrite,
     )
     backfiller = PolymarketBackfiller(config)
@@ -490,6 +568,86 @@ def parse_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def price_history_frame_from_raw(raw_dir: Path) -> pd.DataFrame:
+    """Build a normalized price-history frame from raw CLOB history JSON files."""
+
+    rows: list[dict[str, Any]] = []
+    for path in sorted((raw_dir / "history").glob("*.json")):
+        try:
+            payload = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            logger.warning("polymarket_history_json_invalid", path=str(path))
+            continue
+        rows.extend(price_history_rows(payload))
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return pd.DataFrame(
+            columns=["market_id", "token_id", "outcome", "timestamp", "price", "source_file"]
+        )
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+    frame = frame.dropna(subset=["timestamp", "price"])
+    frame["price"] = frame["price"].clip(0.001, 0.999)
+    return frame.sort_values(["market_id", "outcome", "timestamp"]).reset_index(drop=True)
+
+
+def price_history_rows(raw_file_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return normalized rows from one raw CLOB prices-history payload."""
+
+    payload = raw_file_payload.get("payload")
+    history = payload.get("history") if isinstance(payload, dict) else []
+    if not isinstance(history, list):
+        return []
+    rows = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        timestamp = history_timestamp(item)
+        price = parse_float(item.get("p") or item.get("price"))
+        if timestamp is None or price is None:
+            continue
+        rows.append(
+            {
+                "market_id": str(raw_file_payload.get("market_id")),
+                "token_id": str(raw_file_payload.get("token_id")),
+                "outcome": raw_file_payload.get("outcome"),
+                "timestamp": timestamp,
+                "price": price,
+                "source_file": raw_file_payload.get("source"),
+            }
+        )
+    return rows
+
+
+def history_timestamp(item: dict[str, Any]) -> datetime | None:
+    """Parse a CLOB history timestamp from common response fields."""
+
+    raw_value = item.get("t") or item.get("timestamp") or item.get("time")
+    if raw_value is None:
+        return None
+    try:
+        numeric = float(raw_value)
+    except (TypeError, ValueError):
+        parsed = pd.to_datetime(raw_value, utc=True, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return cast(datetime, parsed.to_pydatetime())
+    if numeric > 10_000_000_000:
+        numeric = numeric / 1000
+    return datetime.fromtimestamp(numeric, tz=UTC)
+
+
+def unix_seconds(value: Any) -> int | None:
+    """Parse an optional timestamp value to Unix seconds."""
+
+    if value is None:
+        return None
+    parsed = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return int(parsed.timestamp())
 
 
 def dedupe_markets(markets: list[dict[str, Any]]) -> list[dict[str, Any]]:

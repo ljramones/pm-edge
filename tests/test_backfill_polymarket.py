@@ -7,6 +7,7 @@ from scripts.backfill_polymarket import (
     market_identifier,
     markets_to_resolved_frame,
     parse_markets_page,
+    price_history_rows,
     tag_slug,
 )
 
@@ -53,3 +54,19 @@ def test_clob_token_pairing_and_identifier_helpers() -> None:
     assert market_identifier(market) == "condition_1"
     assert clob_tokens_with_outcomes(market) == [("a", "Yes"), ("b", "No")]
     assert tag_slug("Crypto Markets") == "crypto-markets"
+
+
+def test_price_history_rows_parses_clob_history_payload() -> None:
+    rows = price_history_rows(
+        {
+            "market_id": "m1",
+            "token_id": "yes-token",
+            "outcome": "Yes",
+            "source": "clob",
+            "payload": {"history": [{"t": 1_704_067_200, "p": 0.42}]},
+        }
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["market_id"] == "m1"
+    assert rows[0]["price"] == 0.42

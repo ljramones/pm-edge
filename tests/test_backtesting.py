@@ -83,3 +83,23 @@ def test_backtester_requires_resolved_outcomes_with_clear_message() -> None:
 
     with pytest.raises(ValueError, match="--include-outcomes"):
         Backtester(BacktestConfig(save_results=False)).run(frame)
+
+
+def test_backtester_excludes_lookahead_rows_by_default() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["m1", "m2"],
+            "as_of": pd.date_range("2025-01-01", periods=2, tz="UTC"),
+            "resolved_at": pd.date_range("2025-01-08", periods=2, tz="UTC"),
+            "venue": ["polymarket", "polymarket"],
+            "market_probability": [0.45, 0.45],
+            "model_probability": [0.55, 0.55],
+            "outcome": [1, 1],
+            "is_lookahead": [True, False],
+        }
+    )
+
+    result = Backtester(BacktestConfig(save_results=False, edge_threshold=0.02)).run(frame)
+
+    assert len(result.bets) == 1
+    assert result.bets[0]["market_id"] == "m2"

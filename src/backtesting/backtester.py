@@ -58,6 +58,7 @@ class BacktestConfig(BaseModel):
     fee_model: FeeModel = Field(default_factory=FeeModel)
     walk_forward: WalkForwardConfig = Field(default_factory=WalkForwardConfig)
     save_results: bool = True
+    exclude_lookahead: bool = True
 
 
 class BacktestResult(BaseModel):
@@ -111,6 +112,7 @@ class Backtester:
             frame = frame[frame["as_of"] >= pd.Timestamp(period_start)]
         if period_end is not None:
             frame = frame[frame["as_of"] <= pd.Timestamp(period_end)]
+        frame = exclude_lookahead_rows(frame, enabled=self.config.exclude_lookahead)
 
         splits = WalkForwardSplitter(self.config.walk_forward).split(frame)
         if not splits:
@@ -281,6 +283,9 @@ def normalize_signal_frame(frame: pd.DataFrame) -> pd.DataFrame:
     output["resolved_at"] = pd.to_datetime(output["resolved_at"], utc=True)
     output["market_probability"] = output["market_probability"].astype(float).clip(0.001, 0.999)
     output["model_probability"] = output["model_probability"].astype(float).clip(0.001, 0.999)
+    if "is_lookahead" not in output:
+        output["is_lookahead"] = False
+    output["is_lookahead"] = output["is_lookahead"].fillna(False).astype(bool)
     unresolved = output["resolved_at"].isna() | output["outcome"].isna()
     if unresolved.any():
         examples = output.loc[unresolved, "market_id"].astype(str).head(5).tolist()
@@ -293,6 +298,22 @@ def normalize_signal_frame(frame: pd.DataFrame) -> pd.DataFrame:
         )
     output["outcome"] = output["outcome"].astype(int).clip(0, 1)
     return output.sort_values("as_of").reset_index(drop=True)
+
+
+def exclude_lookahead_rows(frame: pd.DataFrame, *, enabled: bool) -> pd.DataFrame:
+    """Exclude rows explicitly marked as lookahead for PnL simulation."""
+
+    if not enabled or frame.empty or "is_lookahead" not in frame:
+        return frame
+    lookahead = frame["is_lookahead"].fillna(False).astype(bool)
+    count = int(lookahead.sum())
+    if count:
+        logger.warning(
+            "backtest_lookahead_rows_excluded",
+            rows=count,
+            remaining_rows=int((~lookahead).sum()),
+        )
+    return frame[~lookahead].copy()
 
 
 def _json_float(value: float) -> float | str:

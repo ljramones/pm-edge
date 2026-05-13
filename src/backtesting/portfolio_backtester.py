@@ -9,7 +9,12 @@ from uuid import uuid4
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
-from backtesting.backtester import BacktestConfig, FeeModel, normalize_signal_frame
+from backtesting.backtester import (
+    BacktestConfig,
+    FeeModel,
+    exclude_lookahead_rows,
+    normalize_signal_frame,
+)
 from backtesting.metrics import BacktestMetrics, EvaluationReport, max_drawdown
 from backtesting.rubric import EvaluationRubric, RubricDecision
 from core.models import Venue
@@ -32,6 +37,7 @@ class PortfolioBacktestConfig(BaseModel):
     fee_model: FeeModel = Field(default_factory=FeeModel)
     kelly: KellyPortfolioConfig = Field(default_factory=KellyPortfolioConfig)
     diagnostic_mode: bool = False
+    exclude_lookahead: bool = True
 
 
 class PortfolioBacktestResult(BaseModel):
@@ -81,6 +87,7 @@ class PortfolioBacktester:
             frame = frame[frame["as_of"] >= pd.Timestamp(period_start)]
         if period_end is not None:
             frame = frame[frame["as_of"] <= pd.Timestamp(period_end)]
+        frame = exclude_lookahead_rows(frame, enabled=self.config.exclude_lookahead)
         if frame.empty:
             report = EvaluationReport()
             return PortfolioBacktestResult(
@@ -340,6 +347,7 @@ def portfolio_config_from_backtest_config(
         starting_capital=config.starting_capital,
         edge_threshold=config.edge_threshold,
         fee_model=config.fee_model,
+        exclude_lookahead=config.exclude_lookahead,
         kelly=KellyPortfolioConfig(
             kelly_fraction=kelly_fraction,
             max_total_exposure=max_exposure,
