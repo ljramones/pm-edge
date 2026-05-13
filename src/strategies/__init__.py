@@ -6,6 +6,7 @@ from strategies.liquidity_provider import (
     LiquidityProvider,
     LiquidityProviderConfig,
     backtest_liquidity,
+    liquidity_diagnostics,
 )
 from strategies.structural_scanner import StructuralOpportunity, StructuralScanner
 
@@ -18,4 +19,5 @@ __all__ = [
     "StructuralOpportunity",
     "StructuralScanner",
     "backtest_liquidity",
+    "liquidity_diagnostics",
 ]

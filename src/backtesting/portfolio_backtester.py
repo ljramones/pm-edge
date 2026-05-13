@@ -339,9 +339,12 @@ def portfolio_config_from_backtest_config(
     quarter_kelly: bool = False,
     min_post_cost_edge: float = 0.0,
     diagnostic_mode: bool = False,
+    liquidity_cap_multiplier: float = 1.0,
+    ignore_liquidity_cap: bool = False,
 ) -> PortfolioBacktestConfig:
     """Create portfolio config from existing independent-bet config."""
 
+    liquidity_fraction_cap = 0.1 * max(float(liquidity_cap_multiplier), 0.0)
     return PortfolioBacktestConfig(
         strategy_name=config.strategy_name,
         starting_capital=config.starting_capital,
@@ -355,7 +358,8 @@ def portfolio_config_from_backtest_config(
             quarter_kelly=quarter_kelly,
             min_cash_buffer=0.30 if quarter_kelly else 0.0,
             min_post_cost_edge=min_post_cost_edge,
-            ignore_liquidity_cap=diagnostic_mode,
+            liquidity_fraction_cap=liquidity_fraction_cap,
+            ignore_liquidity_cap=diagnostic_mode or ignore_liquidity_cap,
         ),
         diagnostic_mode=diagnostic_mode,
     )

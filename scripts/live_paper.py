@@ -32,6 +32,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-llm", action="store_true")
     parser.add_argument("--use-onchain", action="store_true")
     parser.add_argument("--crypto-only", action="store_true")
+    parser.add_argument("--min-edge", type=float, default=0.08)
+    parser.add_argument("--adverse-buffer", type=float, default=0.25)
+    parser.add_argument("--max-tail-exposure", type=float, default=0.06)
+    parser.add_argument(
+        "--mode",
+        choices=["directional", "liquidity-only"],
+        default="directional",
+        help="Paper trading strategy mode. liquidity-only disables directional edge betting.",
+    )
     parser.add_argument(
         "--llm-provider",
         choices=["ollama", "openai", "claude", "grok"],
@@ -84,6 +93,10 @@ async def run() -> int:
             "ollama" if args.ollama else args.llm_provider or settings.llm_provider,
         ),
         articles_per_market=args.articles_per_market,
+        mode=args.mode,
+        liquidity_min_edge=args.min_edge,
+        liquidity_adverse_buffer=args.adverse_buffer,
+        liquidity_max_tail_exposure=args.max_tail_exposure,
     )
     trader = PaperTrader(config=config, settings=settings)
     try:

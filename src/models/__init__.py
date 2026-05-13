@@ -8,12 +8,16 @@ from models.baselines import (
     average_probabilities,
 )
 from models.gbdt import LightGBMProbabilityModel
+from models.trainer import GBDTModelArtifact, GBDTTrainer, TrainerConfig
 
 __all__ = [
+    "GBDTModelArtifact",
+    "GBDTTrainer",
     "ICWeightedFactorModel",
     "LightGBMProbabilityModel",
     "LogisticBaseline",
     "ProbabilityModel",
     "RidgeProbabilityBaseline",
+    "TrainerConfig",
     "average_probabilities",
 ]

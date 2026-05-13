@@ -5,6 +5,7 @@ import pandas as pd
 from scripts.generate_signals import (
     SIGNAL_COLUMNS,
     active_resolved_market_rows,
+    apply_walk_forward_model,
     attach_resolved_outcomes,
     coerce_single_file_output,
     ensure_signal_schema,
@@ -148,6 +149,47 @@ def test_resolved_market_signal_generation_uses_backfill_universe(tmp_path: Path
     assert frame["outcome"].eq(0).all()
     assert frame["advanced_enabled"].all()
     assert "advanced_model_probability" in frame.columns
+
+
+def test_apply_walk_forward_model_sets_trained_probability(tmp_path: Path) -> None:
+    rows = 260
+    dates = pd.date_range("2024-01-01", periods=rows, freq="D", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "market_id": [f"m-{index}" for index in range(rows)],
+            "question": [f"Will BTC signal {index} resolve yes?" for index in range(rows)],
+            "as_of": dates,
+            "resolved_at": dates + pd.Timedelta(days=1),
+            "venue": ["polymarket"] * rows,
+            "market_probability": [0.35 + (index % 7) * 0.04 for index in range(rows)],
+            "model_probability": [0.5] * rows,
+            "edge": [0.0] * rows,
+            "confidence": [0.1] * rows,
+            "outcome": [index % 2 for index in range(rows)],
+            "liquidity": [10_000 + index for index in range(rows)],
+            "volume": [100_000 + index * 10 for index in range(rows)],
+            "fear_sizing_multiplier": [1.0] * rows,
+            "features": [
+                {
+                    "llm_probability": 0.45 + 0.1 * (index % 2),
+                    "llm_news_score": -0.1 + 0.2 * (index % 2),
+                    "onchain_volume_surge": float(index % 5),
+                }
+                for index in range(rows)
+            ],
+        }
+    )
+
+    output = apply_walk_forward_model(
+        frame,
+        model_output=tmp_path / "gbdt.pkl",
+        min_train_rows=60,
+    )
+
+    predicted = output["trained_model_probability"].notna()
+    assert predicted.any()
+    assert (tmp_path / "gbdt.pkl").exists()
+    assert output.loc[predicted, "reasoning"].map(str).str.contains("gbdt walk-forward").all()
 
 
 def test_resolved_signal_row_uses_historical_price_when_available() -> None:

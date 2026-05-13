@@ -69,13 +69,24 @@ def build_markdown_report(run_dir: Path, *, chart_path: Path) -> str:
         f"Run directory: `{run_dir}`",
         f"Created at: `{manifest.get('created_at', 'unknown')}`",
         "",
-        "## Executive Summary",
-        "",
-        markdown_table(summary_rows(summary)),
-        "",
-        "## Equity Curves",
-        "",
     ]
+    if manifest.get("args", {}).get("relaxed"):
+        lines.extend(
+            [
+                f"> **{manifest.get('relaxed_warning', 'RELAXED MODE - PnL not representative of strict risk rules')}**",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Executive Summary",
+            "",
+            markdown_table(summary_rows(summary)),
+            "",
+            "## Equity Curves",
+            "",
+        ]
+    )
     if chart_path.exists():
         lines.append(f"![Equity curves]({chart_path.relative_to(run_dir)})")
     else:

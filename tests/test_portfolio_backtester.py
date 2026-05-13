@@ -53,3 +53,19 @@ def test_portfolio_diagnostic_mode_ignores_zero_liquidity_cap() -> None:
     assert normal.diagnostics["liquidity_cap_rejected"] == 1
     assert diagnostic.trades
     assert diagnostic.diagnostics["diagnostic_mode"] is True
+
+
+def test_liquidity_cap_multiplier_relaxes_allocation_cap() -> None:
+    base = portfolio_config_from_backtest_config(
+        BacktestConfig(save_results=False, edge_threshold=0.02),
+        kelly_fraction=0.4,
+        max_exposure=0.2,
+    )
+    relaxed = portfolio_config_from_backtest_config(
+        BacktestConfig(save_results=False, edge_threshold=0.02),
+        kelly_fraction=0.4,
+        max_exposure=0.2,
+        liquidity_cap_multiplier=2.0,
+    )
+
+    assert relaxed.kelly.liquidity_fraction_cap == base.kelly.liquidity_fraction_cap * 2

@@ -318,6 +318,12 @@ python -m scripts.deep_backtest --period 2025-01-01:2026-05-01 --signals data/pr
 # Run Phase 8 liquidity-first hybrid backtest with strict risk gates
 python -m scripts.deep_backtest --period 2025-01-01:2026-05-01 --signals data/processed/signals --strategy hybrid_v1 --crypto-only --use-advanced-features --portfolio --mode hybrid --fear-layer-enabled --quarter-kelly --min-post-cost-edge 0.05
 
+# Run dedicated liquidity / tail-insurance harvester mode
+python -m scripts.deep_backtest --signals data/processed/signals_real_crypto_final.parquet --crypto-only --mode liquidity-only --quarter-kelly --kelly-fraction 0.25 --max-exposure 0.12
+
+# Run live paper trading in liquidity-only mode
+python -m scripts.live_paper --mode liquidity-only --interval 900 --kelly-fraction 0.25 --max-exposure 0.12
+
 # Generate a Markdown report for the latest or specified deep backtest
 python -m scripts.generate_report --input data/processed/deep_backtests
 
@@ -338,6 +344,7 @@ pm-paper-trade
 pm-deep-backtest
 pm-generate-report
 pm-liquidity-backtest
+pm-train-model
 pm-backfill-polymarket
 ```
 
@@ -368,7 +375,7 @@ Paper trading state defaults to `data/processed/live_paper/state.json` and audit
 
 Phase 4 is intentionally paper-only. `pm-paper-trade` never sends orders to Polymarket or Kalshi; it reads markets, computes target paper positions, and writes the simulated decisions to local state/audit files.
 
-Phase 8 hybrid mode remains research/paper-only. The allocator defaults should preserve at least a 30% cash buffer, enforce a minimum 5-point post-fee/impact edge, use quarter Kelly when `--quarter-kelly` is set, and record Monte Carlo ruin diagnostics in each deep-backtest run folder. Liquidity harvesting must clear adverse-selection and slippage gates before it is considered for live paper alerts.
+Phase 8+ hybrid and liquidity-only modes remain research/paper-only. The allocator defaults should preserve at least a 30% cash buffer, enforce a minimum 5-point post-fee/impact edge, use quarter Kelly when `--quarter-kelly` is set, and record Monte Carlo ruin diagnostics in each deep-backtest run folder. `--mode liquidity-only` disables directional betting and routes only maker-side liquidity / tail-insurance opportunities through fear-layer sizing, strict adverse-selection gates, and conservative quote accounting.
 
 Telegram setup:
 

@@ -18,6 +18,7 @@ from data import LLMNewsProcessor, NewsSentimentEngine, OnChainProcessor
 from data.llm_news_processor import LLMProvider
 from data.onchain_processor import infer_asset_symbol
 from features import FeatureStore
+from models import GBDTTrainer, TrainerConfig
 from strategies import EdgeDetector
 from utils import configure_logging, get_logger, resolve_repo_path
 
@@ -61,6 +62,23 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=48.0,
         help="Maximum age of a historical price point before marking the row as lookahead.",
+    )
+    parser.add_argument(
+        "--train-model",
+        action="store_true",
+        help="Train a walk-forward GBDT model and use it for model_probability.",
+    )
+    parser.add_argument(
+        "--model-output",
+        type=Path,
+        default=Path("models/gbdt_signal_model.pkl"),
+        help="Path for the latest trained walk-forward model artifact.",
+    )
+    parser.add_argument(
+        "--min-train-rows",
+        type=int,
+        default=200,
+        help="Minimum resolved training rows before walk-forward GBDT predictions start.",
     )
     parser.add_argument(
         "--demo", action="store_true", help="Generate deterministic demo signals without APIs."
@@ -113,6 +131,7 @@ async def run() -> int:
     args.output = resolve_repo_path(args.output)
     args.resolved_markets = resolve_repo_path(args.resolved_markets)
     args.price_history = resolve_repo_path(args.price_history)
+    args.model_output = resolve_repo_path(args.model_output)
     settings = get_settings()
     if args.ollama_model:
         settings = settings.model_copy(update={"ollama_model": args.ollama_model})
@@ -154,6 +173,9 @@ async def run() -> int:
             price_history=price_history,
             use_historical_prices=args.use_historical_prices,
             max_price_age_hours=args.max_price_age_hours,
+            train_model=args.train_model,
+            model_output=args.model_output,
+            min_train_rows=args.min_train_rows,
         )
         return 0
 
@@ -259,6 +281,12 @@ async def run() -> int:
                 if all_frames
                 else pd.DataFrame(columns=SIGNAL_COLUMNS)
             )
+            if args.train_model:
+                combined = apply_walk_forward_model(
+                    combined,
+                    model_output=args.model_output,
+                    min_train_rows=args.min_train_rows,
+                )
             if combined.empty:
                 raise RuntimeError(
                     "Signal generation produced zero rows. Check market filters, venue backends, "
@@ -487,6 +515,7 @@ def ensure_signal_schema(frame: pd.DataFrame) -> pd.DataFrame:
     output["is_lookahead"] = output["is_lookahead"].fillna(False).astype(bool)
     output["price_source"] = output["price_source"].fillna("unknown")
     output["liquidity_source"] = output["liquidity_source"].fillna("unknown")
+    output["reasoning"] = output["reasoning"].map(normalize_reasoning)
     if (
         "edge" in output
         and output["edge"].isna().all()
@@ -501,6 +530,16 @@ def ensure_signal_schema(frame: pd.DataFrame) -> pd.DataFrame:
     return output[
         SIGNAL_COLUMNS + [column for column in output.columns if column not in SIGNAL_COLUMNS]
     ]
+
+
+def normalize_reasoning(value: Any) -> str:
+    """Coerce reasoning payloads to parquet-friendly strings."""
+
+    if isinstance(value, list):
+        return "; ".join(str(item) for item in value if item is not None)
+    if value is None or pd.isna(value):
+        return ""
+    return str(value)
 
 
 def load_resolved_markets(path: Path) -> pd.DataFrame:
@@ -676,6 +715,9 @@ def write_resolved_market_signals(
     price_history: pd.DataFrame | None = None,
     use_historical_prices: bool = False,
     max_price_age_hours: float = 48.0,
+    train_model: bool = False,
+    model_output: Path | None = None,
+    min_train_rows: int = 200,
 ) -> None:
     """Generate historical signal rows from resolved-market backfill data."""
 
@@ -719,7 +761,44 @@ def write_resolved_market_signals(
                 "Resolved-market signal generation produced zero rows. Check --start-date, "
                 "--end-date, --crypto-only, --markets, and --min-volume."
             )
+        if train_model:
+            combined = apply_walk_forward_model(
+                combined,
+                model_output=model_output,
+                min_train_rows=min_train_rows,
+            )
         write_partition(combined, output)
+
+
+def apply_walk_forward_model(
+    frame: pd.DataFrame,
+    *,
+    model_output: Path | None,
+    min_train_rows: int,
+) -> pd.DataFrame:
+    """Apply walk-forward trained GBDT probabilities to signal rows."""
+
+    trainer = GBDTTrainer(TrainerConfig(min_train_rows=min_train_rows))
+    output, artifact = trainer.predict_walk_forward(frame, model_output=model_output)
+    trained_rows = int(
+        output.get("trained_model_probability", pd.Series(dtype=float)).notna().sum()
+    )
+    logger.info(
+        "signal_generation_trained_model_applied",
+        rows=len(output),
+        trained_rows=trained_rows,
+        model_output=str(model_output) if model_output else None,
+        features=len(artifact.feature_names) if artifact else 0,
+    )
+    if trained_rows == 0:
+        logger.warning(
+            "signal_generation_trained_model_no_predictions",
+            message=(
+                "No walk-forward predictions were made. Need enough rows with "
+                "resolved_at < as_of and both outcome classes."
+            ),
+        )
+    return ensure_signal_schema(output)
 
 
 def active_resolved_market_rows(

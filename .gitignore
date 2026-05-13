@@ -29,6 +29,7 @@ data/*
 data/raw/*
 data/processed/*
 data/backtests/*
+models/*
 !data/.gitkeep
 !data/raw/
 !data/raw/.gitkeep

@@ -28,10 +28,23 @@ from execution import MonteCarloRuinSimulator
 from features import FearLayerRouter, FearSnapshot
 from monitoring import TelegramNotifier
 from scripts.backtest import demo_signals, parse_period
-from strategies import backtest_liquidity
+from strategies import LiquidityProvider, LiquidityProviderConfig, backtest_liquidity
+from strategies.liquidity_provider import liquidity_diagnostics
 from utils import configure_logging, get_logger, resolve_repo_path
 
 logger = get_logger(__name__)
+
+RELAXED_MODE_WARNING = "RELAXED MODE - PnL not representative of strict risk rules"
+STRICT_EDGE_THRESHOLD = 0.02
+STRICT_MAX_EXPOSURE = 0.25
+STRICT_KELLY_FRACTION = 0.4
+STRICT_MIN_POST_COST_EDGE = 0.05
+STRICT_LIQUIDITY_CAP_MULTIPLIER = 1.0
+RELAXED_EDGE_THRESHOLD = 0.015
+RELAXED_MAX_EXPOSURE = 0.30
+RELAXED_KELLY_FRACTION = 0.40
+RELAXED_MIN_POST_COST_EDGE = 0.015
+RELAXED_LIQUIDITY_CAP_MULTIPLIER = 2.0
 
 
 @dataclass(frozen=True)
@@ -52,11 +65,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-advanced-features", action="store_true")
     parser.add_argument("--crypto-only", action="store_true")
     parser.add_argument(
-        "--mode", choices=["directional", "liquidity-harvest", "hybrid"], default="directional"
+        "--mode",
+        choices=["directional", "liquidity-harvest", "liquidity-only", "hybrid"],
+        default="directional",
     )
     parser.add_argument("--fear-layer-enabled", action="store_true")
     parser.add_argument("--quarter-kelly", action="store_true")
-    parser.add_argument("--min-post-cost-edge", type=float, default=0.05)
+    parser.add_argument(
+        "--relaxed",
+        action="store_true",
+        help=(
+            "Run a diagnostic relaxed-risk configuration. Output is not representative "
+            "of strict production risk rules."
+        ),
+    )
+    parser.add_argument("--min-post-cost-edge", type=float, default=STRICT_MIN_POST_COST_EDGE)
     parser.add_argument(
         "--diagnostic-mode",
         action="store_true",
@@ -69,13 +92,43 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--portfolio", action="store_true")
     parser.add_argument("--compare", action="store_true", default=True)
-    parser.add_argument("--edge-threshold", type=float, default=0.02)
+    parser.add_argument("--edge-threshold", type=float, default=STRICT_EDGE_THRESHOLD)
     parser.add_argument("--stake", type=float, default=100.0)
-    parser.add_argument("--kelly-fraction", type=float, default=0.4)
-    parser.add_argument("--max-exposure", type=float, default=0.25)
+    parser.add_argument("--kelly-fraction", type=float, default=STRICT_KELLY_FRACTION)
+    parser.add_argument("--max-exposure", type=float, default=STRICT_MAX_EXPOSURE)
+    parser.add_argument(
+        "--liquidity-cap-multiplier",
+        type=float,
+        default=STRICT_LIQUIDITY_CAP_MULTIPLIER,
+        help="Multiplier applied to the portfolio liquidity fraction cap.",
+    )
+    parser.add_argument(
+        "--ignore-liquidity-cap",
+        action="store_true",
+        help="Diagnostic override to ignore liquidity caps during allocation.",
+    )
     parser.add_argument("--slippage-bps", type=float, default=15.0)
     parser.add_argument("--kalshi-fee-bps", type=float, default=7.0)
     parser.add_argument("--polymarket-fee-bps", type=float, default=0.0)
+    parser.add_argument("--maker-rebate-bps", type=float, default=0.0)
+    parser.add_argument(
+        "--min-edge",
+        type=float,
+        default=None,
+        help="Liquidity harvester post-fee edge gate. Defaults to max(--min-post-cost-edge, 0.08).",
+    )
+    parser.add_argument(
+        "--adverse-buffer",
+        type=float,
+        default=0.25,
+        help="Liquidity adverse-selection buffer used in quote PnL and edge haircut.",
+    )
+    parser.add_argument(
+        "--max-tail-exposure",
+        type=float,
+        default=0.06,
+        help="Maximum portfolio fraction per tail-insurance market.",
+    )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--demo", action="store_true", help="Use deterministic demo signals.")
     parser.add_argument("--no-save-db", action="store_true")
@@ -85,11 +138,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    apply_relaxed_defaults(args)
     if args.signals is not None:
         args.signals = resolve_repo_path(args.signals)
     args.output = resolve_repo_path(args.output)
     settings = get_settings()
     configure_logging(level=settings.log_level, json_logs=settings.log_json)
+    if args.relaxed:
+        logger.warning(
+            "deep_backtest_relaxed_mode_enabled",
+            warning=RELAXED_MODE_WARNING,
+            edge_threshold=args.edge_threshold,
+            min_post_cost_edge=args.min_post_cost_edge,
+            max_exposure=args.max_exposure,
+            kelly_fraction=args.kelly_fraction,
+            liquidity_cap_multiplier=args.liquidity_cap_multiplier,
+            ignore_liquidity_cap=args.ignore_liquidity_cap,
+        )
     period_start, period_end = normalize_period(*parse_period(args.period))
     signals = load_signal_frame(args.signals, demo=args.demo or args.signals is None)
     signals = add_demo_advanced_columns(signals) if args.demo or args.signals is None else signals
@@ -220,14 +285,27 @@ def execute_run(
     run_signals.to_parquet(output_dir / "signals.parquet", index=False)
     lookahead_summary = lookahead_signal_summary(run_signals)
     save_json(output_dir / "lookahead_summary.json", lookahead_summary)
+    if getattr(args, "mode", "directional") == "liquidity-only":
+        return execute_liquidity_only_run(
+            spec,
+            run_signals=run_signals,
+            args=args,
+            output_dir=output_dir,
+            lookahead_summary=lookahead_summary,
+            include_lookahead_pnl=include_lookahead_pnl,
+        )
     if spec.portfolio:
+        relaxed = bool(getattr(args, "relaxed", False))
+        effective_quarter_kelly = bool(getattr(args, "quarter_kelly", False)) and not relaxed
         portfolio_config = portfolio_config_from_backtest_config(
             config,
-            kelly_fraction=0.25 if getattr(args, "quarter_kelly", False) else args.kelly_fraction,
+            kelly_fraction=args.kelly_fraction,
             max_exposure=args.max_exposure,
-            quarter_kelly=getattr(args, "quarter_kelly", False),
+            quarter_kelly=effective_quarter_kelly,
             min_post_cost_edge=getattr(args, "min_post_cost_edge", 0.0),
             diagnostic_mode=getattr(args, "diagnostic_mode", False),
+            liquidity_cap_multiplier=getattr(args, "liquidity_cap_multiplier", 1.0),
+            ignore_liquidity_cap=getattr(args, "ignore_liquidity_cap", False),
         )
         portfolio_result = PortfolioBacktester(portfolio_config).run(
             run_signals,
@@ -246,6 +324,12 @@ def execute_run(
         )
         save_json(output_dir / "portfolio_diagnostics.json", portfolio_result.diagnostics)
         metrics = dict(portfolio_result.report.metrics)
+        if relaxed:
+            metrics["relaxed_mode"] = 1.0
+            metrics["relaxed_effective_quarter_kelly"] = float(effective_quarter_kelly)
+            metrics["relaxed_liquidity_cap_multiplier"] = getattr(
+                args, "liquidity_cap_multiplier", 1.0
+            )
         metrics.update({f"lookahead_{key}": value for key, value in lookahead_summary.items()})
         metrics.update(
             {
@@ -261,13 +345,12 @@ def execute_run(
                 if include_lookahead_pnl or "is_lookahead" not in run_signals
                 else run_signals[~run_signals["is_lookahead"].fillna(False).astype(bool)]
             )
-            liquidity = backtest_liquidity(liquidity_signals)
+            liquidity_signals = add_fear_layer_columns(liquidity_signals)
+            liquidity = backtest_liquidity(liquidity_signals, liquidity_provider_from_args(args))
             liquidity.to_parquet(output_dir / "liquidity_trades.parquet", index=False)
-            liquidity_pnl = float(liquidity["pnl"].sum()) if not liquidity.empty else 0.0
-            metrics["liquidity_pnl"] = liquidity_pnl
-            metrics["hybrid_net_pnl"] = metrics.get("net_pnl", 0.0) + liquidity_pnl
-            metrics["liquidity_quote_count"] = (
-                float(liquidity["should_quote"].sum()) if not liquidity.empty else 0.0
+            metrics.update(liquidity_diagnostics(liquidity))
+            metrics["hybrid_net_pnl"] = metrics.get("net_pnl", 0.0) + metrics.get(
+                "liquidity_pnl", 0.0
             )
         mc = MonteCarloRuinSimulator(starting_capital=portfolio_config.starting_capital).run(
             trades_for_artifact["pnl"] if not trades_for_artifact.empty else pd.Series(dtype=float)
@@ -292,6 +375,8 @@ def execute_run(
     bets = backtest_result.bets_frame()
     bets.to_parquet(output_dir / "bets.parquet", index=False)
     metrics = dict(backtest_result.report.metrics)
+    if getattr(args, "relaxed", False):
+        metrics["relaxed_mode"] = 1.0
     metrics.update({f"lookahead_{key}": value for key, value in lookahead_summary.items()})
     save_json(output_dir / "metrics.json", metrics)
     save_json(output_dir / "rubric.json", backtest_result.rubric.model_dump(mode="json"))
@@ -306,6 +391,167 @@ def execute_run(
         signals=run_signals,
         bets=bets,
     )
+
+
+def execute_liquidity_only_run(
+    spec: DeepRunSpec,
+    *,
+    run_signals: pd.DataFrame,
+    args: argparse.Namespace,
+    output_dir: Path,
+    lookahead_summary: dict[str, float],
+    include_lookahead_pnl: bool,
+) -> DeepRunArtifact:
+    """Execute the dedicated liquidity harvester without directional bets."""
+
+    liquidity_signals = (
+        run_signals
+        if include_lookahead_pnl or "is_lookahead" not in run_signals
+        else run_signals[~run_signals["is_lookahead"].fillna(False).astype(bool)]
+    )
+    liquidity_signals = add_fear_layer_columns(liquidity_signals)
+    provider = liquidity_provider_from_args(args)
+    trades = backtest_liquidity(liquidity_signals, provider)
+    trades.to_parquet(output_dir / "liquidity_trades.parquet", index=False)
+    metrics = liquidity_diagnostics(trades)
+    metrics.update({f"lookahead_{key}": value for key, value in lookahead_summary.items()})
+    metrics["net_pnl"] = metrics.get("liquidity_pnl", 0.0)
+    metrics["bet_count"] = metrics.get("liquidity_quote_count", 0.0)
+    metrics["sharpe"] = liquidity_sharpe(trades)
+    metrics["max_drawdown"] = liquidity_drawdown(trades)
+    metrics["mode_liquidity_only"] = 1.0
+    mc = MonteCarloRuinSimulator().run(
+        trades.loc[trades["should_quote"].astype(bool), "pnl"]
+        if not trades.empty
+        else pd.Series(dtype=float)
+    )
+    save_json(output_dir / "monte_carlo_ruin.json", mc.model_dump(mode="json"))
+    metrics["monte_carlo_ruin_probability"] = mc.ruin_probability
+    save_json(output_dir / "metrics.json", metrics)
+    save_json(output_dir / "liquidity_diagnostics.json", metrics)
+    rubric = liquidity_rubric(metrics)
+    save_json(output_dir / "rubric.json", rubric)
+    write_liquidity_harvester_report(output_dir / "liquidity_harvester_report.md", metrics, rubric)
+    return DeepRunArtifact(
+        name=spec.name,
+        metrics=metrics,
+        rubric=rubric,
+        signals=liquidity_signals,
+        bets=trades,
+    )
+
+
+def liquidity_provider_from_args(args: argparse.Namespace) -> LiquidityProvider:
+    """Build strict liquidity harvester config from CLI risk settings."""
+
+    min_edge_arg = getattr(args, "min_edge", None)
+    min_edge = float(min_edge_arg) if min_edge_arg is not None else float(args.min_post_cost_edge)
+    return LiquidityProvider(
+        LiquidityProviderConfig(
+            max_notional=max(float(args.stake), 1.0),
+            starting_capital=10_000.0,
+            min_tail_post_fee_edge=max(
+                min_edge,
+                float(getattr(args, "min_post_cost_edge", 0.05)),
+                0.10,
+            ),
+            maker_fee_bps=float(args.polymarket_fee_bps),
+            maker_rebate_bps=float(getattr(args, "maker_rebate_bps", 0.0)),
+            max_cluster_exposure=min(float(args.max_exposure), 0.08),
+            max_tail_exposure=min(max(float(getattr(args, "max_tail_exposure", 0.06)), 0.04), 0.06),
+            adverse_selection_buffer=float(getattr(args, "adverse_buffer", 0.25)),
+            min_post_fee_edge=max(
+                min_edge,
+                0.08,
+            ),
+        )
+    )
+
+
+def liquidity_sharpe(trades: pd.DataFrame) -> float:
+    quoted = trades[trades["should_quote"].astype(bool)] if not trades.empty else trades
+    if quoted.empty or "pnl" not in quoted:
+        return 0.0
+    pnl = quoted["pnl"].astype(float)
+    return float(pnl.mean() / pnl.std(ddof=0) * (len(pnl) ** 0.5)) if pnl.std(ddof=0) else 0.0
+
+
+def liquidity_drawdown(trades: pd.DataFrame) -> float:
+    quoted = trades[trades["should_quote"].astype(bool)] if not trades.empty else trades
+    if quoted.empty or "pnl" not in quoted:
+        return 0.0
+    equity = quoted["pnl"].astype(float).cumsum()
+    return float((equity - equity.cummax()).min())
+
+
+def liquidity_rubric(metrics: dict[str, float]) -> dict[str, Any]:
+    """Dedicated Go/No-Go rubric for liquidity-only diagnostics."""
+
+    quote_count = metrics.get("liquidity_quote_count", 0.0)
+    pnl = metrics.get("liquidity_pnl", 0.0)
+    sharpe = metrics.get("sharpe", 0.0)
+    adverse = metrics.get("adverse_selection_loss", 0.0)
+    expected = metrics.get("liquidity_expected_capture", 0.0)
+    if quote_count >= 100 and pnl > 0 and sharpe > 1.0 and adverse <= expected:
+        grade = "Decision-Grade"
+        go_no_go = "Go"
+    elif quote_count >= 30 and pnl > 0:
+        grade = "Promising"
+        go_no_go = "No-Go"
+    else:
+        grade = "Fail"
+        go_no_go = "No-Go"
+    return {
+        "grade": grade,
+        "go_no_go": go_no_go,
+        "reason": (
+            f"liquidity_quote_count={quote_count:.0f}; liquidity_pnl={pnl:.2f}; "
+            f"sharpe={sharpe:.2f}; adverse_selection_loss={adverse:.2f}"
+        ),
+    }
+
+
+def write_liquidity_harvester_report(
+    path: Path, metrics: dict[str, float], rubric: dict[str, Any]
+) -> None:
+    """Write a focused liquidity-only strategy report."""
+
+    rows = [
+        ("Verdict", str(rubric.get("grade", "unknown"))),
+        ("Go / No-Go", str(rubric.get("go_no_go", "unknown"))),
+        ("Quotes", f"{metrics.get('liquidity_quote_count', 0.0):.0f}"),
+        ("Net PnL", f"{metrics.get('liquidity_pnl', 0.0):.2f}"),
+        ("Sharpe", f"{metrics.get('sharpe', 0.0):.2f}"),
+        ("Expected Capture", f"{metrics.get('liquidity_expected_capture', 0.0):.2f}"),
+        ("Incentive Capture", f"{metrics.get('incentive_capture', 0.0):.2f}"),
+        ("Adverse Selection Loss", f"{metrics.get('adverse_selection_loss', 0.0):.2f}"),
+        ("Maker Ratio", f"{metrics.get('maker_ratio', 0.0):.2%}"),
+        ("Biased Tail No Quotes", f"{metrics.get('biased_tail_no_quotes', 0.0):.0f}"),
+        (
+            "Both-Sides Micro-Round Quotes",
+            f"{metrics.get('both_sides_micro_round_quotes', 0.0):.0f}",
+        ),
+        ("Monte Carlo Ruin Probability", f"{metrics.get('monte_carlo_ruin_probability', 0.0):.2%}"),
+        ("Rejected Total", f"{metrics.get('rejected_total', 0.0):.0f}"),
+        ("Rejected Hard Adverse", f"{metrics.get('rejected_hard_adverse_block', 0.0):.0f}"),
+        ("Rejected No Strategic Setup", f"{metrics.get('rejected_no_strategic_setup', 0.0):.0f}"),
+        ("Tail-No PnL", f"{metrics.get('type_biased_tail_no_pnl', 0.0):.2f}"),
+        ("Micro-Round PnL", f"{metrics.get('type_both_sides_micro_round_pnl', 0.0):.2f}"),
+        ("Generic Maker PnL", f"{metrics.get('type_maker_quote_pnl', 0.0):.2f}"),
+        ("High-Fear PnL", f"{metrics.get('high_fear_pnl', 0.0):.2f}"),
+        ("High-Temperature PnL", f"{metrics.get('high_temperature_pnl', 0.0):.2f}"),
+    ]
+    lines = [
+        "# Liquidity Harvester Report",
+        "",
+        "Liquidity-only mode disables directional betting and evaluates maker-side tail insurance / micro-round quoting opportunities.",
+        "",
+        "| Metric | Value |",
+        "| --- | ---: |",
+    ]
+    lines.extend(f"| {name} | {value} |" for name, value in rows)
+    lines.extend(["", f"Rubric reason: {rubric.get('reason', '')}", ""])
+    path.write_text("\n".join(lines))
 
 
 def lookahead_signal_summary(frame: pd.DataFrame) -> dict[str, float]:
@@ -337,6 +583,23 @@ def build_run_specs(args: argparse.Namespace) -> list[DeepRunSpec]:
             DeepRunSpec(name="advanced", use_advanced_features=True, portfolio=args.portfolio)
         )
     return specs
+
+
+def apply_relaxed_defaults(args: argparse.Namespace) -> None:
+    """Apply the relaxed diagnostic profile when strict defaults are still in use."""
+
+    if not getattr(args, "relaxed", False):
+        return
+    if args.edge_threshold == STRICT_EDGE_THRESHOLD:
+        args.edge_threshold = RELAXED_EDGE_THRESHOLD
+    if args.max_exposure == STRICT_MAX_EXPOSURE:
+        args.max_exposure = RELAXED_MAX_EXPOSURE
+    if args.kelly_fraction == STRICT_KELLY_FRACTION:
+        args.kelly_fraction = RELAXED_KELLY_FRACTION
+    if args.min_post_cost_edge == STRICT_MIN_POST_COST_EDGE:
+        args.min_post_cost_edge = RELAXED_MIN_POST_COST_EDGE
+    if args.liquidity_cap_multiplier == STRICT_LIQUIDITY_CAP_MULTIPLIER:
+        args.liquidity_cap_multiplier = RELAXED_LIQUIDITY_CAP_MULTIPLIER
 
 
 def load_signal_frame(path: Path | None, *, demo: bool) -> pd.DataFrame:
@@ -501,6 +764,7 @@ def write_manifest(
         run_dir / "manifest.json",
         {
             "created_at": datetime.now(tz=UTC).isoformat(),
+            "relaxed_warning": RELAXED_MODE_WARNING if getattr(args, "relaxed", False) else None,
             "args": vars(args),
             "runs": [
                 {

@@ -7,7 +7,7 @@ import json
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,9 +18,9 @@ from data import LLMNewsProcessor, NewsSentimentEngine, OnChainProcessor
 from data.llm_news_processor import LLMProvider
 from data.onchain_processor import infer_asset_symbol
 from execution.portfolio import KellyFractionalPortfolio, KellyPortfolioConfig, TargetPosition
-from features import FeatureStore
+from features import FearLayerRouter, FearSnapshot, FeatureStore
 from monitoring import AlertManager, PerformanceTracker, TelegramNotifier
-from strategies import EdgeDetector, EdgeSignal
+from strategies import EdgeDetector, EdgeSignal, LiquidityProvider, LiquidityProviderConfig
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -51,6 +51,10 @@ class PaperTraderConfig(BaseModel):
     llm_provider: LLMProvider = "ollama"
     articles_per_market: int = Field(default=6, ge=0)
     crypto_only: bool = False
+    mode: Literal["directional", "liquidity-only"] = "directional"
+    liquidity_min_edge: float = Field(default=0.08, ge=0.0)
+    liquidity_adverse_buffer: float = Field(default=0.25, ge=0.0)
+    liquidity_max_tail_exposure: float = Field(default=0.06, ge=0.0, le=1.0)
 
 
 class PaperLivePosition(BaseModel):
@@ -180,6 +184,17 @@ class PaperTrader:
         self.onchain_processor = onchain_processor
         if self.onchain_processor is None and self.config.use_onchain:
             self.onchain_processor = OnChainProcessor(settings=self.settings)
+        self.liquidity_provider = LiquidityProvider(
+            LiquidityProviderConfig(
+                starting_capital=self.config.virtual_capital,
+                max_notional=self.config.virtual_capital * self.config.max_position_weight,
+                max_cluster_exposure=min(self.config.max_exposure, 0.08),
+                max_tail_exposure=min(self.config.liquidity_max_tail_exposure, 0.06),
+                min_post_fee_edge=max(self.config.liquidity_min_edge, 0.08),
+                min_tail_post_fee_edge=max(self.config.liquidity_min_edge, 0.10),
+                adverse_selection_buffer=self.config.liquidity_adverse_buffer,
+            )
+        )
         self.state = self._load_state()
         self._last_summary_day: date | None = None
 
@@ -220,7 +235,11 @@ class PaperTrader:
 
         as_of = utc_now()
         markets = await self._fetch_markets()
-        signals = await self._score_markets(markets, as_of=as_of)
+        signals = (
+            await self._liquidity_signals(markets, as_of=as_of)
+            if self.config.mode == "liquidity-only"
+            else await self._score_markets(markets, as_of=as_of)
+        )
         targets = self.allocator.allocate(
             signals,
             capital=self.config.virtual_capital,
@@ -298,6 +317,58 @@ class PaperTrader:
                 )
                 continue
             signals.append(signal)
+        return sorted(
+            signals, key=lambda signal: abs(signal.edge) * signal.confidence, reverse=True
+        )
+
+    async def _liquidity_signals(
+        self, markets: Sequence[UnifiedMarket], *, as_of: datetime
+    ) -> list[EdgeSignal]:
+        """Return paper quote signals from the liquidity harvester only."""
+
+        router = FearLayerRouter()
+        fear = FearSnapshot(vix=28, cnn_fear_greed=35, crypto_fear_greed=30)
+        signals: list[EdgeSignal] = []
+        for market in markets:
+            row = _liquidity_market_row(market)
+            row.update(router.features(row, fear=fear))
+            opportunity = self.liquidity_provider.evaluate(row)
+            self._append_audit(
+                {
+                    "as_of": as_of.isoformat(),
+                    "event": "liquidity_opportunity_evaluated",
+                    **opportunity.model_dump(mode="json"),
+                }
+            )
+            if not opportunity.should_quote:
+                continue
+            await self.telegram_notifier.liquidity_opportunity(
+                market_id=opportunity.market_id,
+                spread=opportunity.spread,
+                incentive=opportunity.incentive_score,
+                edge=opportunity.post_fee_edge,
+                link=opportunity.link,
+            )
+            market_probability = float(row["market_probability"])
+            model_probability = min(
+                max(market_probability + opportunity.post_fee_edge, 0.001), 0.999
+            )
+            signals.append(
+                EdgeSignal(
+                    market_id=market.market_id,
+                    market_prob=market_probability,
+                    model_prob=model_probability,
+                    edge=model_probability - market_probability,
+                    confidence=min(opportunity.post_fee_edge / 0.10, 1.0),
+                    reasoning=[opportunity.reason, opportunity.opportunity_type],
+                    features={
+                        "top_book_liquidity": float(row["liquidity"]),
+                        "liquidity_post_fee_edge": opportunity.post_fee_edge,
+                        "adverse_selection_score": opportunity.adverse_selection_score,
+                        "fear_sizing_multiplier": opportunity.fear_sizing_multiplier,
+                    },
+                )
+            )
         return sorted(
             signals, key=lambda signal: abs(signal.edge) * signal.confidence, reverse=True
         )
@@ -524,6 +595,28 @@ def _liquidity_by_market(markets: Sequence[UnifiedMarket]) -> dict[str, float]:
     return {
         market.market_id: float(market.raw.get("liquidity", market.raw.get("volume", 0)) or 0.0)
         for market in markets
+    }
+
+
+def _liquidity_market_row(market: UnifiedMarket) -> dict[str, Any]:
+    raw = market.raw
+    bid = float(raw.get("best_bid", raw.get("bid", 0.0)) or 0.0)
+    ask = float(raw.get("best_ask", raw.get("ask", 0.0)) or 0.0)
+    market_probability = float(
+        raw.get("last_trade_price", raw.get("price", raw.get("mid", 0.5))) or 0.5
+    )
+    spread = float(raw.get("spread", abs(ask - bid) if ask and bid else 0.03) or 0.03)
+    return {
+        "market_id": market.market_id,
+        "market_probability": market_probability,
+        "model_probability": market_probability,
+        "spread": spread,
+        "liquidity": float(raw.get("liquidity", raw.get("volume", 0.0)) or 0.0),
+        "volume": float(raw.get("volume", raw.get("liquidity", 0.0)) or 0.0),
+        "duration_hours": float(raw.get("duration_hours", 24.0) or 24.0),
+        "category": raw.get("category", "crypto" if infer_asset_symbol(market) else "unknown"),
+        "slug": raw.get("slug", market.market_id),
+        "url": raw.get("url"),
     }
 
 
