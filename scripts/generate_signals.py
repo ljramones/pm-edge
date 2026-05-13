@@ -8,7 +8,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 import pandas as pd
 from tqdm import tqdm
@@ -23,6 +23,7 @@ from strategies import EdgeDetector
 from utils import configure_logging, get_logger, resolve_repo_path
 
 logger = get_logger(__name__)
+PriceHistoryLookup: TypeAlias = pd.DataFrame | dict[str, pd.DataFrame]
 
 
 def parse_args() -> argparse.Namespace:
@@ -584,6 +585,24 @@ def load_price_history(path: Path) -> pd.DataFrame:
     return frame.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
 
 
+def build_price_history_lookup(price_history: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Index historical CLOB prices by market id for fast resolved-signal generation."""
+
+    if price_history.empty:
+        return {}
+    frame = price_history.copy()
+    frame["market_id"] = frame["market_id"].astype(str)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+    frame = frame.dropna(subset=["market_id", "timestamp", "price"]).sort_values(
+        ["market_id", "timestamp"]
+    )
+    return {
+        market_id: market_frame.reset_index(drop=True)
+        for market_id, market_frame in frame.groupby("market_id", sort=False)
+    }
+
+
 def attach_resolved_outcomes(signals: pd.DataFrame, resolved_markets: pd.DataFrame) -> pd.DataFrame:
     """Fill outcome/resolved_at by matching signals to resolved market rows."""
 
@@ -724,6 +743,11 @@ def write_resolved_market_signals(
     if single_file and output.exists() and not overwrite:
         return
     all_frames: list[pd.DataFrame] = []
+    price_lookup: PriceHistoryLookup | None = (
+        build_price_history_lookup(price_history)
+        if use_historical_prices and price_history is not None
+        else price_history
+    )
     for timestamp in tqdm(timestamps, desc="resolved-signals"):
         path = output if single_file else partition_path(output, timestamp)
         if path.exists() and not overwrite:
@@ -733,7 +757,7 @@ def write_resolved_market_signals(
                 row,
                 timestamp=timestamp,
                 include_advanced=include_advanced,
-                price_history=price_history,
+                price_history=price_lookup,
                 use_historical_prices=use_historical_prices,
                 max_price_age_hours=max_price_age_hours,
             )
@@ -841,7 +865,7 @@ def resolved_signal_row(
     *,
     timestamp: datetime,
     include_advanced: bool,
-    price_history: pd.DataFrame | None = None,
+    price_history: PriceHistoryLookup | None = None,
     use_historical_prices: bool = False,
     max_price_age_hours: float = 48.0,
 ) -> dict[str, Any]:
@@ -901,15 +925,20 @@ def historical_quote_for_row(
     row: dict[str, Any],
     *,
     timestamp: datetime,
-    price_history: pd.DataFrame | None,
+    price_history: PriceHistoryLookup | None,
     max_price_age_hours: float,
 ) -> HistoricalQuote | None:
     """Return nearest non-future CLOB Yes price for one market row."""
 
-    if price_history is None or price_history.empty:
+    if price_history is None:
         return None
     market_id = str(row.get("market_id"))
-    market_history = price_history[price_history["market_id"].astype(str) == market_id].copy()
+    if isinstance(price_history, dict):
+        market_history = price_history.get(market_id, pd.DataFrame()).copy()
+    else:
+        if price_history.empty:
+            return None
+        market_history = price_history[price_history["market_id"].astype(str) == market_id].copy()
     if market_history.empty:
         return None
     as_of = pd.Timestamp(timestamp)

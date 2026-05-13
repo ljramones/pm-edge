@@ -129,6 +129,42 @@ def parse_args() -> argparse.Namespace:
         default=0.06,
         help="Maximum portfolio fraction per tail-insurance market.",
     )
+    parser.add_argument(
+        "--min-spread",
+        type=float,
+        default=0.05,
+        help="Minimum quoted spread required by the liquidity harvester.",
+    )
+    parser.add_argument(
+        "--min-liquidity",
+        type=float,
+        default=2_500.0,
+        help="Minimum effective liquidity required by the liquidity harvester.",
+    )
+    parser.add_argument(
+        "--tail-no-min-price",
+        type=float,
+        default=0.88,
+        help="Minimum No price for biased-tail insurance.",
+    )
+    parser.add_argument(
+        "--tail-no-max-price",
+        type=float,
+        default=0.92,
+        help="Maximum No price for biased-tail insurance.",
+    )
+    parser.add_argument(
+        "--micro-sum-threshold",
+        type=float,
+        default=1.015,
+        help="Minimum YES+NO sum for both-sides micro-round quoting before buffer.",
+    )
+    parser.add_argument(
+        "--micro-buffer",
+        type=float,
+        default=0.003,
+        help="Safety buffer added to --micro-sum-threshold.",
+    )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--demo", action="store_true", help="Use deterministic demo signals.")
     parser.add_argument("--no-save-db", action="store_true")
@@ -464,6 +500,12 @@ def liquidity_provider_from_args(args: argparse.Namespace) -> LiquidityProvider:
                 min_edge,
                 0.08,
             ),
+            min_spread=float(getattr(args, "min_spread", 0.05)),
+            min_liquidity=float(getattr(args, "min_liquidity", 2_500.0)),
+            tail_no_min_price=float(getattr(args, "tail_no_min_price", 0.88)),
+            tail_no_max_price=float(getattr(args, "tail_no_max_price", 0.92)),
+            both_sides_sum_threshold=float(getattr(args, "micro_sum_threshold", 1.015)),
+            both_sides_buffer=float(getattr(args, "micro_buffer", 0.003)),
         )
     )
 
