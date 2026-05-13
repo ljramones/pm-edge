@@ -329,7 +329,7 @@ class PolymarketIndexer(VenueIndexer):
                 or item.get("startDate")
                 or item.get("startDateIso")
             ),
-            raw=item,
+            raw=_compact_raw(item),
         )
 
 
@@ -353,6 +353,16 @@ def _list_from_jsonish(value: Any) -> list[Any]:
     except json.JSONDecodeError:
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+def _compact_raw(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep scalar metadata fields without retaining large nested Gamma payloads."""
+
+    return {
+        key: value
+        for key, value in item.items()
+        if value is None or isinstance(value, (str, int, float, bool))
+    }
 
 
 def _levels_from_payload(levels: list[Any]) -> list[dict[str, float]]:

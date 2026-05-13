@@ -21,7 +21,7 @@ from data.forward_indexer.filters import (
 )
 from data.forward_indexer.kalshi import KalshiIndexer
 from data.forward_indexer.polymarket import PolymarketIndexer
-from data.forward_indexer.runner import IndexerRunner, RunnerConfig
+from data.forward_indexer.runner import IndexerRunner, RunnerConfig, ranked_markets
 from data.forward_indexer.schemas import (
     SCHEMA_VERSION,
     market_metadata_snapshot_schema,
@@ -238,6 +238,37 @@ def test_activity_filter_rejection_reason_counts_first_failure() -> None:
     }
 
 
+def test_ranked_markets_prefers_higher_volume_then_liquidity_then_tighter_spread() -> None:
+    markets = [
+        MarketDescriptor(
+            venue="test",
+            market_id="low",
+            question="Low",
+            volume_24h=15_000,
+            liquidity=5_000,
+            spread=0.01,
+        ),
+        MarketDescriptor(
+            venue="test",
+            market_id="wide",
+            question="Wide",
+            volume_24h=20_000,
+            liquidity=5_000,
+            spread=0.09,
+        ),
+        MarketDescriptor(
+            venue="test",
+            market_id="tight",
+            question="Tight",
+            volume_24h=20_000,
+            liquidity=5_000,
+            spread=0.01,
+        ),
+    ]
+
+    assert [market.market_id for market in ranked_markets(markets)] == ["tight", "wide", "low"]
+
+
 @pytest.mark.asyncio
 async def test_websocket_mock_dropout_reconnect_updates_book_state() -> None:
     market = MarketDescriptor(
@@ -438,6 +469,7 @@ async def test_forward_index_dry_run_smoke(monkeypatch: pytest.MonkeyPatch, tmp_
         forward_indexer_max_last_trade_age_hours = 24.0
         forward_indexer_min_market_age_minutes = 30.0
         forward_indexer_min_time_to_close_hours = 2.0
+        forward_indexer_max_tracked_markets_per_venue = 500
         forward_indexer_output_dir = tmp_path
         forward_indexer_max_memory_mb = 1024
         http_timeout_seconds = 1

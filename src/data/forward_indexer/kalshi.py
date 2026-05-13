@@ -272,7 +272,7 @@ class KalshiIndexer(VenueIndexer):
                 or item.get("updated_time")
             ),
             created_at=_parse_datetime(item.get("open_time") or item.get("created_time")),
-            raw=item,
+            raw=_compact_raw(item),
         )
 
 
@@ -300,6 +300,16 @@ def _normalized_price(value: Any) -> float | None:
     if price is None:
         return None
     return price / 100 if price > 1 else price
+
+
+def _compact_raw(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep scalar metadata fields without retaining large nested venue payloads."""
+
+    return {
+        key: value
+        for key, value in item.items()
+        if value is None or isinstance(value, (str, int, float, bool))
+    }
 
 
 def _float_or_none(value: Any) -> float | None:

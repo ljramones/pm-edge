@@ -35,6 +35,7 @@ class RunnerConfig:
     max_last_trade_age_hours: float = 24.0
     min_market_age_minutes: float = 30.0
     min_time_to_close_hours: float = 2.0
+    max_tracked_markets_per_venue: int = 500
     output_dir: Path = Path("data/raw/forward_index")
     max_memory_mb: float = 1024.0
     polling_mode: bool = False
@@ -133,6 +134,8 @@ class IndexerRunner:
                     tracked.append(market)
                 else:
                     rejection_counts[rejection_reason] += 1
+            tracked_candidates = len(tracked)
+            tracked = ranked_markets(tracked)[: self.config.max_tracked_markets_per_venue]
             self._tracked_markets[indexer.venue] = tracked
             if not self.config.dry_run:
                 for chunk in _chunks(markets, 1_000):
@@ -147,7 +150,9 @@ class IndexerRunner:
                 "forward_indexer_discovery",
                 venue=indexer.venue,
                 discovered=len(markets),
+                tracked_candidates=tracked_candidates,
                 tracked=len(tracked),
+                max_tracked_markets_per_venue=self.config.max_tracked_markets_per_venue,
                 filter_rejection_reasons=rejection_counts,
                 **rejection_counts,
             )
@@ -284,6 +289,20 @@ def metadata_record(market: MarketDescriptor, *, captured_at: datetime) -> dict[
         "end_date": market.end_date,
         "raw_json": json.dumps(market.raw, default=str, sort_keys=True),
     }
+
+
+def ranked_markets(markets: list[MarketDescriptor]) -> list[MarketDescriptor]:
+    """Rank subscription candidates by liquidity usefulness."""
+
+    return sorted(
+        markets,
+        key=lambda market: (
+            market.volume_24h or 0.0,
+            market.liquidity or 0.0,
+            -(market.spread if market.spread is not None else 1.0),
+        ),
+        reverse=True,
+    )
 
 
 def _chunks(markets: list[MarketDescriptor], size: int) -> list[list[MarketDescriptor]]:

@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     forward_indexer_max_last_trade_age_hours: float = Field(default=24.0, ge=0.0)
     forward_indexer_min_market_age_minutes: float = Field(default=30.0, ge=0.0)
     forward_indexer_min_time_to_close_hours: float = Field(default=2.0, ge=0.0)
+    forward_indexer_max_tracked_markets_per_venue: int = Field(default=500, ge=1)
     forward_indexer_max_memory_mb: float = Field(default=1024.0, gt=0)
 
     @model_validator(mode="after")

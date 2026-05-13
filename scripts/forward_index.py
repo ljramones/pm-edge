@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         default=settings.forward_indexer_min_time_to_close_hours,
     )
     parser.add_argument(
+        "--max-tracked-markets-per-venue",
+        type=int,
+        default=settings.forward_indexer_max_tracked_markets_per_venue,
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=settings.forward_indexer_output_dir,
@@ -132,6 +137,7 @@ async def run() -> None:
         max_last_trade_age_hours=args.max_last_trade_age_hours,
         min_market_age_minutes=args.min_market_age_minutes,
         min_time_to_close_hours=args.min_time_to_close_hours,
+        max_tracked_markets_per_venue=args.max_tracked_markets_per_venue,
         output_dir=args.output_dir,
         max_memory_mb=args.max_memory_mb,
         polling_mode=args.polling_mode,
