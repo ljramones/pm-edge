@@ -15,6 +15,8 @@ class FearSnapshot(BaseModel):
     vix: float = 20.0
     cnn_fear_greed: float = 50.0
     crypto_fear_greed: float = 50.0
+    onchain_panic: float = 0.0
+    funding_stress: float = 0.0
 
     @property
     def fear_score(self) -> float:
@@ -23,7 +25,15 @@ class FearSnapshot(BaseModel):
         vix_component = min(max((self.vix - 12) / 38, 0.0), 1.0)
         cnn_component = 1 - min(max(self.cnn_fear_greed / 100, 0.0), 1.0)
         crypto_component = 1 - min(max(self.crypto_fear_greed / 100, 0.0), 1.0)
-        return 0.35 * vix_component + 0.25 * cnn_component + 0.40 * crypto_component
+        onchain_component = min(max(self.onchain_panic, 0.0), 1.0)
+        funding_component = min(max(abs(self.funding_stress), 0.0), 1.0)
+        return (
+            0.30 * vix_component
+            + 0.20 * cnn_component
+            + 0.35 * crypto_component
+            + 0.10 * onchain_component
+            + 0.05 * funding_component
+        )
 
 
 class MarketTemperature(BaseModel):
@@ -63,10 +73,9 @@ class FearLayerRouter:
         """Return routing and sizing state for one market."""
 
         snapshot = fear or FearSnapshot()
-        effective = max(
-            (liquidity**0.5) * (1 + volume / max(liquidity, 1.0)) / (1 + spread * 10), 1e-9
-        )
-        temperature = 1 / effective
+        raw_effective = (liquidity**0.5) * (1 + volume / max(liquidity, 1.0)) / (1 + spread * 10)
+        effective = max(raw_effective, 1.0)
+        temperature = min(1 / effective, 1.0)
         route = effective >= self.min_effective_attention and temperature <= self.max_temperature
         multiplier = max(
             0.25,
@@ -97,12 +106,28 @@ class FearLayerRouter:
             fear=fear,
         )
         snapshot = fear or FearSnapshot()
+        fear_score = snapshot.fear_score
+        temperature = state.temperature
+        attention = state.effective_attention
+        spread = _as_float(row.get("spread", 0.0))
+        volume = _as_float(row.get("volume", 0.0))
+        liquidity = _as_float(row.get("liquidity", 0.0))
+        attention_decay = 1.0 / (1.0 + temperature * 100.0)
+        high_fear = 1.0 if fear_score >= 0.55 else 0.0
+        high_temperature = 1.0 if temperature >= self.max_temperature * 0.5 else 0.0
         return {
             "fear_score": snapshot.fear_score,
-            "market_temperature": state.temperature,
-            "effective_attention": state.effective_attention,
+            "market_temperature": temperature,
+            "effective_attention": attention,
             "fear_sizing_multiplier": state.sizing_multiplier,
             "fear_route": 1.0 if state.route else 0.0,
+            "fear_temperature_interaction": fear_score * temperature,
+            "fear_attention_interaction": fear_score * attention_decay,
+            "high_fear_regime": high_fear,
+            "high_temperature_regime": high_temperature,
+            "fear_regime_liquidity_stress": high_fear * spread / max(liquidity**0.5, 1.0),
+            "attention_decay": attention_decay,
+            "volume_attention_proxy": volume / max(attention, 1.0),
         }
 
 

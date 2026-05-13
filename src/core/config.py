@@ -44,11 +44,13 @@ class Settings(BaseSettings):
     polymarket_api_secret: SecretStr | None = None
     polymarket_api_passphrase: SecretStr | None = None
     polymarket_base_url: str = "https://clob.polymarket.com"
+    polymarket_gamma_url: str = "https://gamma-api.polymarket.com"
     polymarket_chain_id: int = 137
 
     kalshi_api_key: SecretStr | None = None
     kalshi_api_secret: SecretStr | None = None
-    kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
+    kalshi_base_url: str = "https://external-api.kalshi.com/trade-api/v2"
+    kalshi_request_delay_seconds: float = Field(default=0.2, ge=0.0)
 
     news_api_key: SecretStr | None = None
     etherscan_api_key: SecretStr | None = None
@@ -128,6 +130,16 @@ class Settings(BaseSettings):
     quarter_kelly: bool = False
     min_post_cost_edge: float = Field(default=0.05, ge=0.0)
     liquidity_harvest_mode: bool = False
+    forward_indexer_output_dir: Path = Path("data/raw/forward_index")
+    forward_indexer_emit_cadence_seconds: int = Field(default=15, ge=1)
+    forward_indexer_discovery_cadence_seconds: float = Field(default=1800.0, ge=1)
+    forward_indexer_book_depth_levels: int = Field(default=5, ge=1, le=50)
+    forward_indexer_min_24h_volume_usd: float = Field(default=10_000.0, ge=0.0)
+    forward_indexer_max_spread_cents: float = Field(default=10.0, ge=0.0)
+    forward_indexer_max_last_trade_age_hours: float = Field(default=24.0, ge=0.0)
+    forward_indexer_min_market_age_minutes: float = Field(default=30.0, ge=0.0)
+    forward_indexer_min_time_to_close_hours: float = Field(default=2.0, ge=0.0)
+    forward_indexer_max_memory_mb: float = Field(default=1024.0, gt=0)
 
     @model_validator(mode="after")
     def resolve_relative_paths(self) -> Settings:
@@ -141,6 +153,7 @@ class Settings(BaseSettings):
             "paper_trader_state_path",
             "paper_trader_audit_log_path",
             "paper_trader_review_flag_path",
+            "forward_indexer_output_dir",
         ]
         for field_name in path_fields:
             resolved = resolve_repo_path(getattr(self, field_name))

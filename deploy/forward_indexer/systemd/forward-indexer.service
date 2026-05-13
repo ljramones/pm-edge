@@ -1,0 +1,20 @@
+[Unit]
+Description=pm-edge forward market data indexer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmedge
+Group=pmedge
+WorkingDirectory=/opt/pm-edge
+EnvironmentFile=/opt/pm-edge/.env
+ExecStart=/opt/pm-edge/.venv/bin/python -m scripts.forward_index --output-dir /opt/pm-edge/data/raw/forward_index
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=60
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

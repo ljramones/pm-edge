@@ -8,9 +8,11 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 
 ## Status
 
-Phase 8 liquidity-first hybrid strategy is now implemented. The repo has the Phase 0 trading foundation, Phase 1 edge-signal components, Phase 2 backtesting/evaluation, Phase 3 historical signal generation plus Kelly-style portfolio simulation, Phase 4A optional LLM/on-chain feature groups, Phase 4 live paper monitoring, Phase 5 deep comparison/report tooling, Phase 6 failure/feature diagnostics, Phase 7 crypto/sample/liquidity iteration tracks, and Phase 8 fear routing plus hardened liquidity-harvest risk controls. A real historical 2025 high-volume-market run still requires configured market/data backfills.
+Phase 14 enhanced feature engineering is now implemented. The repo has the Phase 0 trading foundation, Phase 1 edge-signal components, Phase 2 backtesting/evaluation, Phase 3 historical signal generation plus Kelly-style portfolio simulation, Phase 4A optional LLM/on-chain feature groups, Phase 4 live paper monitoring, Phase 5 deep comparison/report tooling, Phase 6 failure/feature diagnostics, Phase 7 crypto/sample/liquidity iteration tracks, Phase 8 fear routing plus hardened liquidity-harvest risk controls, and enhanced on-chain / fear / micro-round features for crypto validation. A real historical production run still depends on configured market/data backfills.
 
 For a detailed architecture and implementation walkthrough, see [Technical Overview](docs/TECHNICAL_OVERVIEW.md).
+
+For the latest enhanced-feature validation, see [Feature Engineering Impact Report](docs/FEATURE_ENGINEERING_IMPACT_REPORT.md).
 
 Current committed milestone line:
 
@@ -43,6 +45,7 @@ Current committed milestone line:
 - **Telegram alerts:** optional async Telegram notifier with review buttons, liquidity alerts, degradation alerts, and daily summaries
 - **Deep analysis:** base-vs-advanced backtest comparisons, calibration, edge decay, regimes, category cuts, failure cases, report generation
 - **Phase 8 risk controls:** fear/temperature routing, biased-tail liquidity harvesting, post-cost edge gates, quarter Kelly, cash buffer, and Monte Carlo ruin simulation
+- **Phase 14 enhanced features:** deterministic on-chain/flow proxies, bounded fear-temperature features, micro-round maker-advantage diagnostics, and walk-forward GBDT training support
 - **Tooling:** hatchling/uv-compatible packaging, black, ruff, mypy, pytest, pytest-asyncio, pre-commit
 
 ---

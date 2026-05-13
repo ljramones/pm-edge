@@ -17,6 +17,9 @@ from data.onchain_processor import OnChainMetricSnapshot
 from data.poll_aggregator import PollAggregate
 from features.advanced_features import AdvancedFeatureExtractor, AdvancedFeatureInputs
 from features.cross_market import CrossMarketAnalyzer, CrossMarketFeatureSet
+from features.fear_layer import FearLayerRouter, FearSnapshot
+from features.micro_round import MicroRoundFeatureExtractor
+from features.onchain_enhanced import EnhancedOnChainFeatureExtractor
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -49,10 +52,18 @@ class FeatureStore:
         client: PredictionMarketClient | None = None,
         cross_market_analyzer: CrossMarketAnalyzer | None = None,
         advanced_extractor: AdvancedFeatureExtractor | None = None,
+        enhanced_onchain_extractor: EnhancedOnChainFeatureExtractor | None = None,
+        micro_round_extractor: MicroRoundFeatureExtractor | None = None,
+        fear_router: FearLayerRouter | None = None,
     ) -> None:
         self.client = client
         self.cross_market_analyzer = cross_market_analyzer or CrossMarketAnalyzer()
         self.advanced_extractor = advanced_extractor or AdvancedFeatureExtractor()
+        self.enhanced_onchain_extractor = (
+            enhanced_onchain_extractor or EnhancedOnChainFeatureExtractor()
+        )
+        self.micro_round_extractor = micro_round_extractor or MicroRoundFeatureExtractor()
+        self.fear_router = fear_router or FearLayerRouter()
 
     async def build_market_features(
         self,
@@ -69,6 +80,7 @@ class FeatureStore:
         llm_summary: LLMNewsSummary | None = None,
         onchain_snapshot: OnChainMetricSnapshot | None = None,
         news_velocity: dict[str, float] | None = None,
+        use_enhanced_features: bool = False,
         as_of: datetime | None = None,
     ) -> FeatureVector:
         """Build a single market feature vector."""
@@ -107,6 +119,26 @@ class FeatureStore:
                         sentiment_vector=sentiment_vector,
                         news_velocity=news_velocity or {},
                     )
+                )
+            )
+        if use_enhanced_features:
+            enhanced_row = {
+                **market.raw,
+                **features,
+                "market_id": market.market_id,
+                "question": market.title,
+                "market_probability": _market_probability(book) or 0.5,
+                "model_probability": features.get("llm_probability", 0.5),
+            }
+            features.update(self.enhanced_onchain_extractor.extract(enhanced_row))
+            features.update(self.micro_round_extractor.extract(enhanced_row))
+            features.update(
+                self.fear_router.features(
+                    enhanced_row,
+                    fear=FearSnapshot(
+                        onchain_panic=features.get("enh_panic_reversion_score", 0.0) / 5.0,
+                        funding_stress=features.get("enh_funding_rate_momentum", 0.0),
+                    ),
                 )
             )
 

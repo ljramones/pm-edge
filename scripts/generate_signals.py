@@ -17,7 +17,13 @@ from core import BackendUnavailableError, PredictionMarketClient, UnifiedMarket,
 from data import LLMNewsProcessor, NewsSentimentEngine, OnChainProcessor
 from data.llm_news_processor import LLMProvider
 from data.onchain_processor import infer_asset_symbol
-from features import FeatureStore
+from features import (
+    EnhancedOnChainFeatureExtractor,
+    FearLayerRouter,
+    FearSnapshot,
+    FeatureStore,
+    MicroRoundFeatureExtractor,
+)
 from models import GBDTTrainer, TrainerConfig
 from strategies import EdgeDetector
 from utils import configure_logging, get_logger, resolve_repo_path
@@ -92,6 +98,12 @@ def parse_args() -> argparse.Namespace:
         "--use-advanced-features",
         action="store_true",
         help="Compatibility flag: enable advanced feature columns in generated signals.",
+    )
+    parser.add_argument(
+        "--feature-set",
+        choices=["base", "advanced", "enhanced"],
+        default="base",
+        help="Feature set to materialize in generated signal rows.",
     )
     parser.add_argument(
         "--fear-layer-enabled",
@@ -177,6 +189,7 @@ async def run() -> int:
             train_model=args.train_model,
             model_output=args.model_output,
             min_train_rows=args.min_train_rows,
+            include_enhanced=enhanced_features_enabled(args),
         )
         return 0
 
@@ -406,8 +419,15 @@ def advanced_features_enabled(args: argparse.Namespace, settings: Any) -> bool:
         args.use_llm
         or args.use_onchain
         or args.use_advanced_features
+        or args.feature_set in {"advanced", "enhanced"}
         or getattr(settings, "use_advanced_features", False)
     )
+
+
+def enhanced_features_enabled(args: argparse.Namespace) -> bool:
+    """Return whether enhanced Phase 14 feature engineering is enabled."""
+
+    return bool(args.feature_set == "enhanced")
 
 
 def prepare_single_file_output(path: Path, *, overwrite: bool) -> None:
@@ -470,6 +490,17 @@ class HistoricalQuote:
     timestamp: pd.Timestamp
     age_seconds: float
     source: str
+    yes_no_sum: float | None = None
+    no_price: float | None = None
+
+
+@dataclass(frozen=True)
+class EnhancedResolvedExtractors:
+    """Reusable enhanced feature extractors for resolved-market generation."""
+
+    onchain: EnhancedOnChainFeatureExtractor
+    micro: MicroRoundFeatureExtractor
+    fear: FearLayerRouter
 
 
 def build_signal_row(
@@ -731,6 +762,7 @@ def write_resolved_market_signals(
     high_volume_only: bool,
     min_volume: float,
     include_advanced: bool,
+    include_enhanced: bool = False,
     price_history: pd.DataFrame | None = None,
     use_historical_prices: bool = False,
     max_price_age_hours: float = 48.0,
@@ -748,6 +780,15 @@ def write_resolved_market_signals(
         if use_historical_prices and price_history is not None
         else price_history
     )
+    enhanced_extractors = (
+        EnhancedResolvedExtractors(
+            onchain=EnhancedOnChainFeatureExtractor(),
+            micro=MicroRoundFeatureExtractor(),
+            fear=FearLayerRouter(),
+        )
+        if include_enhanced
+        else None
+    )
     for timestamp in tqdm(timestamps, desc="resolved-signals"):
         path = output if single_file else partition_path(output, timestamp)
         if path.exists() and not overwrite:
@@ -757,6 +798,8 @@ def write_resolved_market_signals(
                 row,
                 timestamp=timestamp,
                 include_advanced=include_advanced,
+                include_enhanced=include_enhanced,
+                enhanced_extractors=enhanced_extractors,
                 price_history=price_lookup,
                 use_historical_prices=use_historical_prices,
                 max_price_age_hours=max_price_age_hours,
@@ -865,6 +908,8 @@ def resolved_signal_row(
     *,
     timestamp: datetime,
     include_advanced: bool,
+    include_enhanced: bool = False,
+    enhanced_extractors: EnhancedResolvedExtractors | None = None,
     price_history: PriceHistoryLookup | None = None,
     use_historical_prices: bool = False,
     max_price_age_hours: float = 48.0,
@@ -885,7 +930,17 @@ def resolved_signal_row(
         historical_quote.price if historical_quote is not None else resolved_market_probability(row)
     )
     model_probability = resolved_model_probability(row, market_probability, include_advanced)
-    features = resolved_signal_features(row, model_probability=model_probability)
+    duration_minutes = resolved_market_duration_minutes(row)
+    features = resolved_signal_features(
+        row,
+        model_probability=model_probability,
+        market_probability=market_probability,
+        historical_quote=historical_quote,
+        duration_minutes=duration_minutes,
+        include_enhanced=include_enhanced,
+        enhanced_extractors=enhanced_extractors,
+        timestamp=timestamp,
+    )
     is_lookahead = use_historical_prices and historical_quote is None
     output = {
         "market_id": str(row.get("market_id")),
@@ -906,7 +961,12 @@ def resolved_signal_row(
         "liquidity": numeric_value(row.get("liquidity_num"), row.get("liquidity"), default=0.0),
         "volume": numeric_value(row.get("volume_num"), row.get("volume"), default=0.0),
         "fear_sizing_multiplier": 1.0,
+        "duration_minutes": duration_minutes,
+        "yes_no_sum": historical_quote.yes_no_sum if historical_quote else pd.NA,
         "advanced_enabled": include_advanced,
+        "feature_set": (
+            "enhanced" if include_enhanced else ("advanced" if include_advanced else "base")
+        ),
         "price_source": historical_quote.source if historical_quote else "resolved_market_snapshot",
         "is_lookahead": is_lookahead,
         "historical_price_at": historical_quote.timestamp if historical_quote else pd.NaT,
@@ -949,6 +1009,10 @@ def historical_quote_for_row(
         return None
     yes_history = market_history[market_history["outcome"].astype(str).str.lower().eq("yes")]
     no_history = market_history[market_history["outcome"].astype(str).str.lower().eq("no")]
+    no_price: float | None = None
+    if not no_history.empty:
+        no_point = no_history.sort_values("timestamp").iloc[-1]
+        no_price = min(max(float(no_point["price"]), 0.001), 0.999)
     if not yes_history.empty:
         point = yes_history.sort_values("timestamp").iloc[-1]
         price = float(point["price"])
@@ -968,7 +1032,21 @@ def historical_quote_for_row(
         timestamp=price_time,
         age_seconds=age_seconds,
         source=source,
+        yes_no_sum=(min(max(price, 0.001), 0.999) + no_price) if no_price is not None else None,
+        no_price=no_price,
     )
+
+
+def resolved_market_duration_minutes(row: dict[str, Any]) -> float:
+    """Return resolved market duration in minutes when timestamps are available."""
+
+    start = pd.to_datetime(
+        row.get("start_date") or row.get("created_at"), utc=True, errors="coerce"
+    )
+    end = pd.to_datetime(row.get("closed_time") or row.get("end_date"), utc=True, errors="coerce")
+    if pd.isna(start) or pd.isna(end):
+        return 1440.0
+    return max(float((end - start).total_seconds() / 60.0), 1.0)
 
 
 def resolved_market_probability(row: dict[str, Any]) -> float:
@@ -1003,19 +1081,34 @@ def resolved_model_probability(
     return min(max(probability, 0.01), 0.99)
 
 
-def resolved_signal_features(row: dict[str, Any], *, model_probability: float) -> dict[str, float]:
+def resolved_signal_features(
+    row: dict[str, Any],
+    *,
+    model_probability: float,
+    market_probability: float,
+    historical_quote: HistoricalQuote | None,
+    duration_minutes: float,
+    include_enhanced: bool,
+    enhanced_extractors: EnhancedResolvedExtractors | None,
+    timestamp: datetime,
+) -> dict[str, float]:
     """Build feature payload for resolved-market bootstrap rows."""
 
     liquidity = numeric_value(row.get("liquidity_num"), row.get("liquidity"), default=0.0)
     volume = numeric_value(row.get("volume_num"), row.get("volume"), default=0.0)
+    yes_no_sum = historical_quote.yes_no_sum if historical_quote else None
     spread = max(
         0.0,
         numeric_value(row.get("best_ask"), default=1.0)
         - numeric_value(row.get("best_bid"), default=0.0),
     )
-    return {
+    if historical_quote is not None and yes_no_sum is not None:
+        spread = max(spread, min(max(yes_no_sum - 1.0, 0.001), 0.25))
+    features = {
         "top_book_liquidity": liquidity,
         "spread": spread,
+        "duration_minutes": duration_minutes,
+        "yes_no_sum": yes_no_sum or 1.0,
         "mention_count_7d": 0.0,
         "llm_probability": model_probability,
         "llm_news_score": (model_probability - 0.5) * 2,
@@ -1027,6 +1120,60 @@ def resolved_signal_features(row: dict[str, Any], *, model_probability: float) -
         "onchain_volume_surge": min(volume / max(liquidity, 1.0), 5.0) if liquidity else 0.0,
         "onchain_tvl_change_24h": 0.0,
         "fear_sizing_multiplier": 1.0,
+    }
+    if include_enhanced:
+        extractors = enhanced_extractors or EnhancedResolvedExtractors(
+            onchain=EnhancedOnChainFeatureExtractor(),
+            micro=MicroRoundFeatureExtractor(),
+            fear=FearLayerRouter(),
+        )
+        enhanced_row = {
+            **row,
+            **features,
+            "market_probability": market_probability,
+            "model_probability": model_probability,
+            "duration_minutes": duration_minutes,
+            "yes_no_sum": yes_no_sum or 1.0,
+            "as_of": timestamp,
+        }
+        features.update(extractors.onchain.extract(enhanced_row))
+        features.update(extractors.micro.extract(enhanced_row))
+        fear_snapshot = FearSnapshot(
+            vix=28.0,
+            cnn_fear_greed=35.0,
+            crypto_fear_greed=30.0,
+            onchain_panic=features.get("enh_panic_reversion_score", 0.0) / 5.0,
+            funding_stress=features.get("enh_funding_rate_momentum", 0.0),
+        )
+        features.update(extractors.fear.features(enhanced_row, fear=fear_snapshot))
+        features.update(enhanced_temporal_features(row, timestamp=timestamp))
+    return features
+
+
+def enhanced_temporal_features(row: dict[str, Any], *, timestamp: datetime) -> dict[str, float]:
+    """Build calendar/age features for resolved-market historical rows."""
+
+    as_of = pd.Timestamp(timestamp)
+    if as_of.tzinfo is None:
+        as_of = as_of.tz_localize("UTC")
+    start = pd.to_datetime(
+        row.get("start_date") or row.get("created_at"), utc=True, errors="coerce"
+    )
+    end = pd.to_datetime(row.get("closed_time") or row.get("end_date"), utc=True, errors="coerce")
+    total = (
+        max(float((end - start).total_seconds()), 1.0)
+        if not pd.isna(start) and not pd.isna(end)
+        else 1.0
+    )
+    elapsed = max(float((as_of - start).total_seconds()), 0.0) if not pd.isna(start) else 0.0
+    remaining = max(float((end - as_of).total_seconds()), 0.0) if not pd.isna(end) else 0.0
+    progress = min(max(elapsed / total, 0.0), 1.0)
+    return {
+        "enh_market_age_hours": elapsed / 3600.0,
+        "enh_hours_to_resolution": remaining / 3600.0,
+        "enh_lifecycle_progress": progress,
+        "enh_is_final_day": 1.0 if remaining <= 86_400 else 0.0,
+        "enh_is_weekend": 1.0 if as_of.weekday() >= 5 else 0.0,
     }
 
 

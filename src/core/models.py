@@ -221,3 +221,52 @@ class BacktestBet(SQLModel, table=True):
     pnl: Decimal = Field(max_digits=18, decimal_places=6)
     return_on_capital: Decimal = Field(max_digits=12, decimal_places=6)
     raw: dict[str, object] = Field(default_factory=dict, sa_column=Column(JSON))
+
+
+class OrderBookSnapshot(SQLModel, table=True):
+    """Forward-indexed order book snapshot for simulator-grade replay."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    venue: Venue = Field(index=True)
+    market_id: str = Field(index=True)
+    token_id_yes: str | None = Field(default=None, index=True)
+    token_id_no: str | None = Field(default=None, index=True)
+    timestamp_utc: datetime = Field(default_factory=utc_now, index=True)
+    bid_levels: list[dict[str, float]] = Field(default_factory=list, sa_column=Column(JSON))
+    ask_levels: list[dict[str, float]] = Field(default_factory=list, sa_column=Column(JSON))
+    top_bid: Decimal | None = Field(default=None, max_digits=12, decimal_places=6)
+    top_ask: Decimal | None = Field(default=None, max_digits=12, decimal_places=6)
+    mid: Decimal | None = Field(default=None, max_digits=12, decimal_places=6)
+    spread: Decimal | None = Field(default=None, max_digits=12, decimal_places=6)
+    snapshot_source: str = Field(index=True)
+    schema_version: int = Field(default=1, index=True)
+
+
+class TradeEvent(SQLModel, table=True):
+    """Forward-indexed public trade event."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    venue: Venue = Field(index=True)
+    market_id: str = Field(index=True)
+    token_id: str | None = Field(default=None, index=True)
+    timestamp_utc: datetime = Field(default_factory=utc_now, index=True)
+    price: Decimal = Field(max_digits=12, decimal_places=6)
+    size: Decimal = Field(max_digits=18, decimal_places=6)
+    side: str | None = Field(default=None, index=True)
+    trade_id_venue: str | None = Field(default=None, index=True)
+    schema_version: int = Field(default=1, index=True)
+
+
+class MarketMetadataSnapshot(SQLModel, table=True):
+    """Forward-indexed market metadata snapshot."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    venue: Venue = Field(index=True)
+    market_id: str = Field(index=True)
+    captured_at_utc: datetime = Field(default_factory=utc_now, index=True)
+    status: str = Field(index=True)
+    volume_24h: Decimal | None = Field(default=None, max_digits=18, decimal_places=6)
+    liquidity: Decimal | None = Field(default=None, max_digits=18, decimal_places=6)
+    end_date: datetime | None = Field(default=None, index=True)
+    raw_json: dict[str, object] = Field(default_factory=dict, sa_column=Column(JSON))
+    schema_version: int = Field(default=1, index=True)

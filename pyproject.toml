@@ -52,6 +52,7 @@ dependencies = [
     "seaborn>=0.13.0",
     "streamlit>=1.40.0",
     "aiogram>=3.13.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -80,6 +81,7 @@ pm-generate-report = "scripts.generate_report:main"
 pm-liquidity-backtest = "scripts.liquidity_backtest:main"
 pm-backfill-polymarket = "scripts.backfill_polymarket:main"
 pm-train-model = "scripts.train_model:main"
+pm-forward-index = "scripts.forward_index:main"
 
 [tool.hatch.build.targets.wheel]
 packages = [

@@ -1,6 +1,6 @@
 # pm-edge Technical Overview
 
-This document describes the current pm-edge system as implemented through Phase 8. The project is a modular, async-first prediction-market research and paper-trading platform focused on Polymarket, Kalshi, and crypto-heavy market opportunities.
+This document describes the current pm-edge system as implemented through Phase 14. The project is a modular, async-first prediction-market research and paper-trading platform focused on Polymarket, Kalshi, and crypto-heavy market opportunities.
 
 The system is intentionally research- and paper-first. It can fetch markets, generate probability estimates, create edge signals, simulate bets and portfolios, run deep diagnostics, and operate a live paper-trading loop with monitoring. It does not enable real-money execution in the current phase.
 
@@ -13,7 +13,23 @@ pm-edge is built around four core ideas:
 - Convert probability edge into realistic, risk-constrained paper positions.
 - Reject weak strategies through deterministic backtests, deep diagnostics, strict rubrics, and Monte Carlo survival checks before any live-money consideration.
 
-The latest strategy direction is liquidity-first and crypto-focused: biased tails, fear-driven setups, neglected sides, and maker-side liquidity are prioritized over unconstrained directional betting.
+The current strategy direction is liquidity-first and crypto-focused: biased tails, fear-driven setups, neglected sides, and maker-side liquidity are prioritized over unconstrained directional betting. Directional betting remains research-only and should stay disabled unless a future holdout backtest clears the rubric.
+
+## Technology Stack
+
+The repo is a Python research system with production-style boundaries rather than a trading bot wired directly to real money.
+
+- Runtime: Python 3.11+ with async I/O through `asyncio` and `httpx`.
+- Packaging: `pyproject.toml` with hatchling/uv-compatible editable installs.
+- Configuration: Pydantic v2 and `pydantic-settings`, loaded from `.env` through `src/core/config.py`.
+- Dataframes and storage: pandas, numpy, pyarrow/parquet, SQLModel, SQLite locally, and Postgres/Supabase-style database URLs for deployed persistence.
+- Market access: PMXT as the preferred unified client path, with direct Polymarket CLOB and Kalshi adapter fallbacks.
+- Modeling: scikit-learn and LightGBM-style GBDT models with deterministic walk-forward training, calibration hooks, and feature-importance output.
+- LLM processing: local Ollama by default, configured for `qwen2.5:32b`, with optional OpenAI, Claude, or Grok fallback paths for high-value calls.
+- News and external data: NewsAPI/GDELT/RSS-style ingestion, VADER fallback sentiment, DefiLlama/Dune/Arkham-style on-chain hooks, and deterministic proxy features when provider data is sparse.
+- Risk and simulation: fractional/quarter Kelly sizing, post-cost edge gates, liquidity caps, adverse-selection buffers, Monte Carlo ruin simulation, and Go/No-Go rubrics.
+- Monitoring: loguru/structlog logging, Streamlit dashboard, console/webhook alerts, optional async Telegram notifications.
+- Quality gates: pytest, ruff, black, mypy.
 
 ## Architecture
 
@@ -23,8 +39,8 @@ The repository is organized by responsibility:
 src/
   core/          Config, SQLModel schema, market client facade, scanner
   data/          Database, poll/news/on-chain/LLM processors, resolved backfill
-  features/      Feature store, cross-market features, advanced features, fear layer
-  models/        Baselines and LightGBM probability wrappers
+  features/      Feature store, cross-market, advanced, fear, on-chain, micro-round features
+  models/        Baselines, LightGBM wrappers, walk-forward trainer
   strategies/    Edge detector, liquidity provider, structural scanner
   execution/     Paper trading, portfolio sizing, risk engine
   backtesting/   Signal, portfolio, deep-analysis, metrics, rubric
@@ -57,7 +73,7 @@ Key configuration areas:
 - Data providers: NewsAPI/GDELT, LLM providers, DefiLlama/Dune/Arkham-style hooks.
 - Runtime safety: paper-trading mode, virtual capital, order caps, review thresholds.
 - Telegram: optional bot token, chat id, enable flag, rate limit.
-- Phase 8 controls: fear layer, liquidity-harvest mode, quarter Kelly, post-cost edge floor.
+- Strategy controls: fear layer, liquidity-harvest mode, quarter Kelly, post-cost edge floor, adverse-selection buffers, cash buffer, Telegram settings.
 
 The project uses Python 3.11+, hatchling packaging, and dev tooling through `pyproject.toml`. On macOS/Homebrew Python, install inside a virtual environment or via `uv`; do not install into the externally managed system environment.
 
@@ -107,7 +123,7 @@ These models support SQLite locally and Postgres/Supabase-style deployments thro
 
 ### Advanced LLM News Processor
 
-`src/data/llm_news_processor.py` adds optional LLM-based summarization and probabilistic signal extraction. It is provider-configurable for OpenAI, Claude, or Grok-style APIs through settings.
+`src/data/llm_news_processor.py` adds optional LLM-based summarization and probabilistic signal extraction. It is provider-configurable and defaults to local Ollama for normal news summarization and sentiment reasoning. Frontier model providers can be configured as fallback paths for high-value calls.
 
 The processor includes:
 
@@ -140,8 +156,28 @@ The module degrades safely when provider credentials or live data are unavailabl
 - Historical resolution stats.
 - Optional advanced LLM/on-chain features.
 - Optional fear-layer outputs.
+- Optional enhanced on-chain, market-temperature, and micro-round features.
 
 `src/features/advanced_features.py` flattens LLM, on-chain, cross-source agreement, and temporal velocity features into model-ready fields.
+
+`src/features/onchain_enhanced.py` adds deterministic crypto-flow features that can consume real provider fields when available and fall back to stable proxies otherwise:
+
+- Whale-flow velocity.
+- Smart-money cluster score.
+- Funding-rate momentum and basis pressure.
+- Open-interest surge and liquidation-cascade risk.
+- TVL / volume deltas.
+- Address-cluster activity.
+- Panic-reversion score.
+
+`src/features/micro_round.py` adds short-duration market features:
+
+- 5-15 minute market detection.
+- YES/NO price-sum excess.
+- Incentive multiplier proxy.
+- Maker-advantage score.
+- Adverse-fill risk.
+- 8-12c tail-zone marker.
 
 ## Probability Models and Edge Detection
 
@@ -159,6 +195,14 @@ The baselines are intended to provide interpretable reference probabilities and 
 
 `src/models/gbdt.py` wraps LightGBM-style probability modeling with time-series-safe calibration support. It supports feature importance output and deterministic training paths for backtesting.
 
+`src/models/trainer.py` provides the production training path for historical signals:
+
+- Walk-forward splits with no future labels in training.
+- Feature flattening from nested signal feature dictionaries.
+- Binary LightGBM training with calibration support.
+- Model, metadata, and feature-importance artifacts.
+- Reproducible training through deterministic defaults.
+
 ### Edge Detector
 
 `src/strategies/edge_detector.py` defines `EdgeSignal`, the central signal object used downstream. An edge signal contains:
@@ -171,17 +215,17 @@ The baselines are intended to provide interpretable reference probabilities and 
 - Reasoning strings.
 - Feature contributions.
 
-The detector combines feature vectors, baselines, optional GBDT-style model output, and optional advanced feature adjustments. Phase 8 adds fear-layer contribution handling so high-fear setups can influence signal strength and sizing downstream.
+The detector combines feature vectors, baselines, optional GBDT-style model output, and optional advanced/enhanced feature adjustments. Fear-layer contribution handling lets high-fear setups influence signal strength and sizing downstream.
 
-## Phase 8 Fear Layer and Hybrid Strategy
+## Fear Layer, Liquidity, and Hybrid Strategy
 
 ### Fear Layer
 
-`src/features/fear_layer.py` implements the market-temperature router.
+`src/features/fear_layer.py` implements the market-temperature router and enhanced fear feature group.
 
 Inputs include:
 
-- Global fear proxies such as VIX, CNN Fear & Greed, and crypto fear/greed indices.
+- Global fear proxies such as VIX, CNN Fear & Greed, crypto fear/greed indices, on-chain panic, and funding stress.
 - Per-market liquidity, spread, volume, and attention proxies.
 
 Outputs include:
@@ -191,6 +235,8 @@ Outputs include:
 - `effective_attention`
 - `fear_sizing_multiplier`
 - `fear_route`
+- `fear_temperature_interaction`
+- regime flags such as high-fear and high-temperature.
 
 The temperature definition is intentionally simple: market temperature rises as effective liquidity/attention falls. This helps route the system toward neglected or fear-driven markets while still giving the allocator a sizing multiplier rather than an unconditional trade instruction.
 
@@ -239,18 +285,47 @@ This is intentionally simple and conservative. It is a scanner for inconsistenci
 - Optional minimum cash buffer.
 - Optional post-cost edge threshold.
 
-Phase 8 gates are opt-in through the strict path: `--quarter-kelly` and `--min-post-cost-edge`. This preserves earlier paper/backtest behavior unless the liquidity-first risk mode is explicitly enabled.
+Strict gates are opt-in through the hardened path: `--quarter-kelly`, post-cost edge controls, adverse-selection buffers, and cash/exposure caps. This preserves earlier paper/backtest behavior unless the liquidity-first risk mode is explicitly enabled.
 
 ### Hardened Risk Engine
 
-`src/execution/risk_engine.py` adds the Phase 8 risk layer:
+`src/execution/risk_engine.py` adds the hardened strategy risk layer:
 
 - `HardenedRiskConfig` documents non-negotiable controls such as 5-point post-cost edge, 30% cash buffer, 8-12% event-cluster exposure cap, 20% adverse-selection buffer, and quarter Kelly.
 - `MonteCarloRuinSimulator` bootstraps realized PnL paths and estimates ruin probability, median final equity, and 5th/95th percentile final equity.
 
 Monte Carlo diagnostics are saved with every portfolio deep-backtest run.
 
-## Backtesting and Evaluation
+## Historical Signals, Backtesting, and Evaluation
+
+### Signal Generation
+
+`scripts/generate_signals.py` is the main historical signal generator. It writes a single flat parquet file by default and enforces a complete signal schema for downstream backtests.
+
+Important capabilities:
+
+- Active or resolved market signal generation.
+- Crypto-only and volume-filtered runs.
+- Outcome joins through `--include-outcomes`.
+- Historical CLOB price joins through `--use-historical-prices`.
+- Lookahead marking with `is_lookahead` when resolved prices have to be used as a fallback.
+- Feature selection through `--feature-set base|advanced|enhanced`.
+- Walk-forward model training through `--train-model`.
+
+Example:
+
+```bash
+python -m scripts.generate_signals \
+  --crypto-only \
+  --include-outcomes \
+  --use-historical-prices \
+  --feature-set enhanced \
+  --train-model \
+  --start-date 2025-01-01 \
+  --end-date 2026-04-02 \
+  --output data/processed/signals_crypto_2025_ytd_enhanced_trained.parquet \
+  --overwrite
+```
 
 ### Signal Backtester
 
@@ -279,12 +354,15 @@ Monte Carlo diagnostics are saved with every portfolio deep-backtest run.
 `scripts/deep_backtest.py` is the main research runner. It supports:
 
 - Base vs advanced feature comparisons.
+- Enhanced feature-set runs from generated signal files.
 - Crypto-only filtering.
 - Portfolio simulation.
 - Hybrid mode with directional plus liquidity-harvest PnL.
+- Liquidity-only mode with directional betting disabled.
 - Fear layer.
 - Quarter Kelly.
 - Minimum post-cost edge.
+- Relaxed diagnostic mode and rejection breakdowns.
 - Monte Carlo ruin simulation.
 - Structured output folders with signals, trades, equity curves, metrics, rubrics, calibration data, and analysis tables.
 
@@ -292,16 +370,16 @@ Example:
 
 ```bash
 python -m scripts.deep_backtest \
-  --period 2025-01-01:2026-05-01 \
-  --signals data/processed/signals \
-  --strategy hybrid_v1 \
+  --signals data/processed/signals_crypto_2025_ytd_enhanced_trained.parquet \
   --crypto-only \
-  --use-advanced-features \
   --portfolio \
   --mode hybrid \
-  --fear-layer-enabled \
   --quarter-kelly \
-  --min-post-cost-edge 0.05
+  --kelly-fraction 0.25 \
+  --max-exposure 0.12 \
+  --min-edge 0.08 \
+  --adverse-buffer 0.25 \
+  --max-tail-exposure 0.06
 ```
 
 ### Deep Analysis
@@ -365,7 +443,9 @@ The main scripts are:
 - `scripts/scan.py`: scan venues for market and arbitrage opportunities.
 - `scripts/edge.py`: rank markets by edge score.
 - `scripts/backtest.py`: run deterministic signal/portfolio backtests.
-- `scripts/generate_signals.py`: generate historical signal parquet partitions.
+- `scripts/backfill_polymarket.py`: backfill resolved/active Polymarket data and historical CLOB prices.
+- `scripts/generate_signals.py`: generate complete historical signal parquet files.
+- `scripts/train_model.py`: train GBDT models from historical signal files.
 - `scripts/deep_backtest.py`: run base/advanced/hybrid deep backtests.
 - `scripts/generate_report.py`: generate Markdown/HTML reports.
 - `scripts/live_paper.py`: run live paper trading.
@@ -387,7 +467,8 @@ The test suite covers:
 - Deep analysis and report generation.
 - Paper trader behavior.
 - Telegram no-op behavior.
-- Fear/risk/liquidity/structural Phase 8 components.
+- Fear/risk/liquidity/structural components.
+- Enhanced on-chain and micro-round feature modules.
 
 Quality gates:
 
@@ -395,32 +476,33 @@ Quality gates:
 pytest
 ruff check .
 black --check src scripts tests
-ruff format --check src scripts tests
-mypy src scripts
+mypy .
 ```
 
-At the time this document was added, the full test suite passed with 41 tests and one benign pandas constant-correlation warning in a small fixture.
+At the time of the Phase 14 update, the full suite passed with 70 tests. The remaining warnings are from small synthetic fixtures and third-party libraries.
 
 ## Current Limitations
 
-The project is structurally complete through Phase 8, but real strategy approval still depends on higher-quality historical data:
+The project is structurally complete through Phase 14, but real strategy approval still depends on higher-quality historical data:
 
-- The deterministic demo fixture is not enough for a real capital decision.
-- The current Go/No-Go rubric correctly rejects small positive samples.
-- Real 2025+ historical signal generation requires configured data backfills.
+- The trained enhanced signal run is more realistic than placeholder/bootstrap probabilities, but it produced zero strict liquidity/hybrid trades on the current 2025-YTD crypto backfill.
+- The current Go/No-Go rubric correctly rejects zero-trade or tiny positive samples.
+- 12.69% of the latest expanded signal file still required lookahead fallback rows and those rows are excluded by backtests.
 - Live money execution is intentionally absent.
 - LLM and on-chain features are optional and should remain behind cost and data-quality controls.
+- Fear features need real historical fear time series before they can prove value.
+- Micro-round validation needs actual short-duration market metadata and both-side order-book history.
 - Liquidity-harvest results must be validated with realistic maker/taker fees, slippage curves, fill assumptions, and adverse-selection buffers on a larger sample.
 
 ## Current Verdict
 
-The strongest path is crypto-specialized, liquidity-first paper trading and backtesting:
+The current verdict is No-Go for real money and cautious No-Go for expanded paper size. The strongest remaining research path is still crypto-specialized, liquidity-first backtesting, but only after data quality improves:
 
 - Continue using strict rejection thresholds.
-- Keep quarter Kelly and minimum 30% cash buffer in Phase 8 mode.
-- Require at least a 5-point post-fee/impact edge.
+- Keep quarter Kelly and minimum 30% cash buffer in hardened liquidity mode.
+- Require at least an 8-10 point post-fee/impact edge for liquidity harvesting unless a future holdout proves a lower gate is justified.
 - Keep the liquidity harvester conservative and cluster-capped.
 - Run Monte Carlo ruin simulation after every material strategy change.
-- Treat any positive demo result as research-only until a fresh, larger holdout clears the rubric.
+- Treat any positive result as research-only until a fresh, larger holdout clears the rubric.
 
-The latest demo hybrid run improved simulated PnL and Monte Carlo survival, but the rubric still returned `Fail / No-Go` due sample size. The correct next step is a real crypto-focused historical backfill and deep backtest before increasing paper size or considering live-money architecture.
+The latest enhanced trained run generated 47,932 rows across 1,575 crypto markets, but strict liquidity-only and hybrid backtests both took zero trades after lookahead filtering. The correct next step is not another strategy layer; it is better historical depth, true bid/ask book history, historical fear/on-chain inputs, and short-duration market metadata. See [Feature Engineering Impact Report](FEATURE_ENGINEERING_IMPACT_REPORT.md) for the latest validation details.
