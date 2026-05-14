@@ -1,6 +1,6 @@
 # pm-edge Technical Overview
 
-This document describes the current pm-edge system as implemented through Phase 14. The project is a modular, async-first prediction-market research and paper-trading platform focused on Polymarket, Kalshi, and crypto-heavy market opportunities.
+This document describes the current pm-edge system as implemented through the forward data-layer deployment. The project is a modular, async-first prediction-market research and paper-trading platform focused on Polymarket, Kalshi, and crypto-heavy market opportunities.
 
 The system is intentionally research- and paper-first. It can fetch markets, generate probability estimates, create edge signals, simulate bets and portfolios, run deep diagnostics, and operate a live paper-trading loop with monitoring. It does not enable real-money execution in the current phase.
 
@@ -13,7 +13,37 @@ pm-edge is built around four core ideas:
 - Convert probability edge into realistic, risk-constrained paper positions.
 - Reject weak strategies through deterministic backtests, deep diagnostics, strict rubrics, and Monte Carlo survival checks before any live-money consideration.
 
-The current strategy direction is liquidity-first and crypto-focused: biased tails, fear-driven setups, neglected sides, and maker-side liquidity are prioritized over unconstrained directional betting. Directional betting remains research-only and should stay disabled unless a future holdout backtest clears the rubric.
+The current strategy direction is liquidity-first and crypto-focused: biased tails, fear-driven setups, neglected sides, and maker-side liquidity are prioritized over unconstrained directional betting. Directional betting remains research-only and stays disabled unless a future holdout backtest clears the rubric.
+
+## Forward Data Layer (Phase 1, deployed)
+
+The forward data layer is the current production data path for future strategy validation. It separates the producer and analysis layers:
+
+- Producer: `scripts/forward_index.py` runs on a DigitalOcean `s-2vcpu-2gb` droplet in TOR1 under systemd. It discovers markets, filters the tradeable universe, maintains book state, emits snapshots every 15 seconds, and writes parquet.
+- Wire format: parquet files partitioned by table, `venue`, and UTC `date` under `data/raw/forward_index/`.
+- Consumer: parquet is synced from the VPS to the laptop with `deploy/forward_indexer/rsync_to_laptop.sh`.
+- Analysis: DuckDB reads the synced parquet locally. The DuckDB query layer is local and does not run on the VPS.
+
+The forward indexer covers both venues with different capture quality:
+
+- Polymarket: discovery uses the Gamma API with active/open filters. Order book state uses CLOB REST initialization plus the public CLOB WebSocket market feed for live book deltas. The validated 23-minute local soak on 200 tracked markets produced 25,600 WebSocket-sourced snapshots and 235 REST-sourced startup snapshots, with memory flat near 334 MB and zero heartbeat errors.
+- Kalshi: discovery uses the public REST market data API with `status=open` and a 7-day `max_close_ts` source filter to bound pagination. Book state is REST-refresh-only in the current deployment. The documented Kalshi WebSocket host returns `HTTP 401` without signed API authentication, so signed Kalshi WebSocket capture is deferred.
+
+Discovery uses a liquidity-focused activity filter before subscription. A market enters the tracked set only when all configured checks pass:
+
+- 24h volume is at least `$10,000`.
+- Spread is at most `10` cents.
+- Recent activity is within the configured recency window.
+- Market age is at least `30` minutes when creation time is available.
+- Time to close is at least `2` hours when close time is available.
+
+The forward data layer writes three parquet tables:
+
+- `order_book_snapshots`: top-N bid/ask levels, top bid/ask, mid, spread, snapshot source, and timestamp.
+- `trade_events`: venue trade id when available, token/outcome id, price, size, side, and timestamp.
+- `market_metadata_snapshots`: market status, 24h volume, liquidity, end date, raw venue metadata, and capture timestamp.
+
+This data path replaces the pre-existing historical signal files as the basis for future strategy validation. See [Data Quality Lessons](DATA_QUALITY_LESSONS.md) for the account of why the legacy `signals_*.parquet` datasets cannot support strategy approval.
 
 ## Technology Stack
 
@@ -39,6 +69,9 @@ The repository is organized by responsibility:
 src/
   core/          Config, SQLModel schema, market client facade, scanner
   data/          Database, poll/news/on-chain/LLM processors, resolved backfill
+  data/forward_indexer/
+                 Forward indexer producer: discovery, filtering, WebSocket subscription,
+                 REST refresh, book state, snapshot emit, parquet writer
   features/      Feature store, cross-market, advanced, fear, on-chain, micro-round features
   models/        Baselines, LightGBM wrappers, walk-forward trainer
   strategies/    Edge detector, liquidity provider, structural scanner
@@ -47,6 +80,7 @@ src/
   monitoring/    Alerts, Telegram, Streamlit dashboard, performance tracker
   utils/         Logging and shared utilities
 scripts/         CLI entrypoints
+deploy/          VPS deployment artifacts
 notebooks/       Analysis templates
 tests/           Unit and integration-style tests
 ```
@@ -62,6 +96,28 @@ Market venues / data providers
   -> backtester or live paper trader
   -> metrics, dashboard, alerts, reports
 ```
+
+The forward data-layer flow is separate from the legacy signal-generation flow:
+
+```text
+Polymarket Gamma/CLOB + Kalshi REST
+  -> src/data/forward_indexer/
+  -> in-memory BookState
+  -> 15-second snapshot emit
+  -> partitioned parquet on VPS
+  -> rsync to laptop
+  -> DuckDB analysis
+```
+
+## Deployment Artifacts
+
+`deploy/forward_indexer/` contains the producer deployment assets:
+
+- `setup_vps.sh`: provisions a fresh Ubuntu 24.04 droplet, creates the `pmedge` user, installs system dependencies and `uv`, clones the repo, creates the virtual environment, installs the package, copies `.env.example`, installs the systemd unit, and starts the service.
+- `systemd/forward-indexer.service`: runs `scripts.forward_index` as the non-root `pmedge` user and restarts on failure.
+- `rsync_to_laptop.sh`: pulls completed parquet parts from the VPS into local `data/raw/forward_index/` without recopying existing files.
+
+The setup script currently requires `PM_EDGE_GIT_REMOTE` to be set to the real repository URL. Its default contains a `YOURUSERNAME` placeholder.
 
 ## Configuration and Runtime
 
@@ -440,6 +496,7 @@ Telegram is disabled unless configured through `.env`.
 
 The main scripts are:
 
+- `scripts/forward_index.py`: run the forward indexer producer locally or under systemd.
 - `scripts/scan.py`: scan venues for market and arbitrage opportunities.
 - `scripts/edge.py`: rank markets by edge score.
 - `scripts/backtest.py`: run deterministic signal/portfolio backtests.
@@ -479,30 +536,33 @@ black --check src scripts tests
 mypy .
 ```
 
-At the time of the Phase 14 update, the full suite passed with 70 tests. The remaining warnings are from small synthetic fixtures and third-party libraries.
+At the time of the forward data-layer update, the full suite passed with 100 tests. The remaining warnings are from small synthetic fixtures and third-party libraries.
 
 ## Current Limitations
 
-The project is structurally complete through Phase 14, but real strategy approval still depends on higher-quality historical data:
+The project has a deployed forward data layer, but strategy validation remains blocked on accumulated clean data and a simulator that consumes captured order books:
 
-- The trained enhanced signal run is more realistic than placeholder/bootstrap probabilities, but it produced zero strict liquidity/hybrid trades on the current 2025-YTD crypto backfill.
-- The current Go/No-Go rubric correctly rejects zero-trade or tiny positive samples.
-- 12.69% of the latest expanded signal file still required lookahead fallback rows and those rows are excluded by backtests.
+- Kalshi WebSocket capture requires signed API authentication and is not implemented in Phase 1. Kalshi currently operates in REST-refresh-only mode, so it captures periodic book state rather than real-time WebSocket deltas.
+- Polymarket book subscription tracks YES tokens. NO-side book state is not independently tracked. In binary markets, the NO side is derivable from the YES complement, but the independent NO book and its spread are not captured in this phase.
+- Polymarket recency filtering uses `updatedAt` as a fallback because Gamma does not expose a guaranteed last-trade timestamp in the fields used by the indexer. On Polymarket, the recency check is effectively a stale-update check. Volume and spread thresholds carry most of the liquidity-filtering load.
+- `deploy/forward_indexer/setup_vps.sh` contains a known deployment footgun: the default `PM_EDGE_GIT_REMOTE` value contains a `YOURUSERNAME` placeholder. The script must be run with `PM_EDGE_GIT_REMOTE` set, or the code must be placed manually at `/opt/pm-edge` before installing the service. The fix is deferred.
+- The signals-pipeline dataset that pre-dated the forward indexer is not suitable for strategy validation. See [Data Quality Lessons](DATA_QUALITY_LESSONS.md) for the full account.
 - Live money execution is intentionally absent.
-- LLM and on-chain features are optional and should remain behind cost and data-quality controls.
-- Fear features need real historical fear time series before they can prove value.
+- LLM and on-chain features remain optional and behind cost/data-quality controls.
+- Fear features need real historical fear time series before they can be evaluated as a sizing input.
 - Micro-round validation needs actual short-duration market metadata and both-side order-book history.
-- Liquidity-harvest results must be validated with realistic maker/taker fees, slippage curves, fill assumptions, and adverse-selection buffers on a larger sample.
 
 ## Current Verdict
 
-The current verdict is No-Go for real money and cautious No-Go for expanded paper size. The strongest remaining research path is still crypto-specialized, liquidity-first backtesting, but only after data quality improves:
+The Phase 1 forward data layer is deployed and producing real WebSocket-sourced data for Polymarket and REST-refreshed data for Kalshi.
 
-- Continue using strict rejection thresholds.
-- Keep quarter Kelly and minimum 30% cash buffer in hardened liquidity mode.
-- Require at least an 8-10 point post-fee/impact edge for liquidity harvesting unless a future holdout proves a lower gate is justified.
-- Keep the liquidity harvester conservative and cluster-capped.
-- Run Monte Carlo ruin simulation after every material strategy change.
-- Treat any positive result as research-only until a fresh, larger holdout clears the rubric.
+The legacy signals dataset cannot support strategy validation, regardless of model or risk-engine quality. Conclusions drawn from backtests on that dataset are not informative because the data contains lookahead fallback contamination, candle-derived price inputs rather than order-book state, noisy activity filtering, unverifiable LLM temporal leakage risk, unmodeled resolution risk, and row-level sample-size inflation.
 
-The latest enhanced trained run generated 47,932 rows across 1,575 crypto markets, but strict liquidity-only and hybrid backtests both took zero trades after lookahead filtering. The correct next step is not another strategy layer; it is better historical depth, true bid/ask book history, historical fear/on-chain inputs, and short-duration market metadata. See [Feature Engineering Impact Report](FEATURE_ENGINEERING_IMPACT_REPORT.md) for the latest validation details.
+Real strategy validation now waits on:
+
+- At least 30 days of clean forward capture.
+- Signed Kalshi WebSocket authentication or an explicit decision to treat Kalshi as REST-only for the first simulator phase.
+- A new execution simulator that consumes captured book state and produces realistic fill estimates against historical resting quotes.
+- Per-market resolution accounting and pre-registered Go criteria.
+
+Real-money execution remains explicitly out of scope. The system stays paper-only until forward-captured data and simulator-backed validation clear the rubric.

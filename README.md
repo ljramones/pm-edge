@@ -8,9 +8,11 @@ Focused on finding and exploiting edge through information aggregation, cross-pl
 
 ## Status
 
-Phase 14 enhanced feature engineering is now implemented. The repo has the Phase 0 trading foundation, Phase 1 edge-signal components, Phase 2 backtesting/evaluation, Phase 3 historical signal generation plus Kelly-style portfolio simulation, Phase 4A optional LLM/on-chain feature groups, Phase 4 live paper monitoring, Phase 5 deep comparison/report tooling, Phase 6 failure/feature diagnostics, Phase 7 crypto/sample/liquidity iteration tracks, Phase 8 fear routing plus hardened liquidity-harvest risk controls, and enhanced on-chain / fear / micro-round features for crypto validation. A real historical production run still depends on configured market/data backfills.
+The forward data layer is now deployed for Phase 1 capture. The repo still contains the Phase 0-14 research, modeling, paper-trading, and diagnostics components, but legacy `signals_*.parquet` backtests are not used for strategy approval. Real validation now depends on accumulated forward book data and a new execution simulator that consumes captured order-book state.
 
 For a detailed architecture and implementation walkthrough, see [Technical Overview](docs/TECHNICAL_OVERVIEW.md).
+
+For the data-quality record explaining why the legacy signals dataset was rejected, see [Data Quality Lessons](docs/DATA_QUALITY_LESSONS.md).
 
 For the latest enhanced-feature validation, see [Feature Engineering Impact Report](docs/FEATURE_ENGINEERING_IMPACT_REPORT.md).
 
@@ -37,6 +39,7 @@ Current committed milestone line:
 - **Unified market access:** PMXT (`pmxt`) first, with Polymarket CLOB (`py-clob-client-v2`) and Kalshi SDK fallbacks
 - **Data and modeling:** pandas, numpy, scikit-learn, LightGBM
 - **Persistence:** SQLModel with SQLite for local development and Postgres/Supabase-style deployments
+- **Forward data layer:** VPS producer, Polymarket WebSocket book capture, Kalshi REST-refresh capture, partitioned parquet, laptop DuckDB analysis
 - **Configuration:** Pydantic v2 + pydantic-settings + `.env`
 - **Reliability:** tenacity retries, typed client boundaries, easy-to-mock adapters
 - **Logging:** loguru + structlog with contextual structured logs
@@ -378,7 +381,7 @@ Paper trading state defaults to `data/processed/live_paper/state.json` and audit
 
 Phase 4 is intentionally paper-only. `pm-paper-trade` never sends orders to Polymarket or Kalshi; it reads markets, computes target paper positions, and writes the simulated decisions to local state/audit files.
 
-Phase 8+ hybrid and liquidity-only modes remain research/paper-only. The allocator defaults should preserve at least a 30% cash buffer, enforce a minimum 5-point post-fee/impact edge, use quarter Kelly when `--quarter-kelly` is set, and record Monte Carlo ruin diagnostics in each deep-backtest run folder. `--mode liquidity-only` disables directional betting and routes only maker-side liquidity / tail-insurance opportunities through fear-layer sizing, strict adverse-selection gates, and conservative quote accounting.
+Phase 8+ hybrid and liquidity-only modes remain research/paper-only. The allocator defaults preserve at least a 30% cash buffer, enforce a minimum 5-point post-fee/impact edge, use quarter Kelly when `--quarter-kelly` is set, and record Monte Carlo ruin diagnostics in each deep-backtest run folder. `--mode liquidity-only` disables directional betting and routes only maker-side liquidity / tail-insurance opportunities through fear-layer sizing, strict adverse-selection gates, and conservative quote accounting.
 
 Telegram setup:
 

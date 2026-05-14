@@ -1,11 +1,11 @@
 # Forward Indexer
 
-The forward indexer is the producer side of the new data layer. It captures public Polymarket and Kalshi market metadata, top-of-book snapshots, and trade events into partitioned parquet files. It is read-only against venues and does not use authenticated trading endpoints or place orders.
+The forward indexer is the producer side of the deployed data layer. It captures public Polymarket and Kalshi market metadata, top-of-book snapshots, and trade events into partitioned parquet files. It is read-only against venues and does not use authenticated trading endpoints or place orders.
 
 ## Architecture
 
 ```text
-Polymarket CLOB REST + WS        Kalshi REST + WS
+Polymarket Gamma/CLOB REST + WS  Kalshi REST
         |                              |
         v                              v
   VenueIndexer implementations in src/data/forward_indexer/
@@ -26,7 +26,9 @@ data/raw/forward_index/
   market_metadata_snapshots/venue=<venue>/date=<YYYY-MM-DD>/*.parquet
 ```
 
-The VPS stores only parquet. The laptop-side DuckDB layer is intentionally out of scope for this phase.
+The VPS stores only parquet. Completed parquet parts are synced to the laptop, where DuckDB reads them directly for analysis.
+
+Polymarket uses Gamma API discovery plus CLOB REST initialization and public CLOB WebSocket book deltas. Kalshi uses REST discovery and REST order-book refresh only in Phase 1. The documented Kalshi WebSocket endpoint requires signed API authentication and returned `HTTP 401` in unauthenticated local validation, so signed Kalshi WebSocket capture is deferred.
 
 ## Captured Tables
 
@@ -37,6 +39,23 @@ Every table includes `schema_version`.
 - `market_metadata_snapshots`: market lifecycle/status, 24h volume, liquidity, end date, raw venue JSON.
 
 Default book depth is 5 levels per side.
+
+## Discovery Filtering
+
+The default tracked universe is liquidity-focused. A discovered market is subscribed only when all checks pass:
+
+- `volume_24h >= 10000`
+- `spread <= 10` cents
+- recent activity within 24 hours
+- market age at least 30 minutes when creation time is available
+- at least 2 hours to close when close time is available
+
+Kalshi discovery also applies a source-side close-window filter:
+
+- `status=open`
+- `max_close_ts` set to 7 days from the discovery time by default
+
+Polymarket discovery uses Gamma active/open filters and a source-side minimum volume parameter.
 
 ## Local Development Quickstart
 
@@ -62,11 +81,22 @@ Default production-style run:
 python -m scripts.forward_index \
   --venues polymarket,kalshi \
   --emit-cadence-seconds 15 \
-  --discovery-cadence-seconds 300 \
+  --discovery-cadence-seconds 1800 \
   --book-depth-levels 5 \
-  --min-24h-volume-usd 1000 \
-  --max-spread-cents 20 \
+  --min-24h-volume-usd 10000 \
+  --max-spread-cents 10 \
+  --kalshi-max-close-days 7 \
   --output-dir data/raw/forward_index
+```
+
+Validated Polymarket soak command:
+
+```bash
+python -m scripts.forward_index \
+  --venues polymarket \
+  --output-dir /tmp/pm-edge-poly \
+  --max-memory-mb 768 \
+  --max-tracked-markets-per-venue 200
 ```
 
 ## VPS Deploy Quickstart
@@ -74,7 +104,7 @@ python -m scripts.forward_index \
 On a fresh Ubuntu 24.04 droplet:
 
 ```bash
-sudo PM_EDGE_GIT_REMOTE=https://github.com/YOURUSERNAME/pm-edge.git \
+sudo PM_EDGE_GIT_REMOTE=https://github.com/<owner>/pm-edge.git \
   bash deploy/forward_indexer/setup_vps.sh
 ```
 
@@ -87,6 +117,8 @@ journalctl -u forward-indexer.service -f
 ```
 
 The service runs as non-root user `pmedge` and writes to `/opt/pm-edge/data/raw/forward_index`.
+
+`PM_EDGE_GIT_REMOTE` is required in practice. The script default contains a placeholder repository URL.
 
 ## Laptop Sync
 
@@ -114,10 +146,11 @@ At default cadence:
 - Estimated daily snapshot parquet: ~300 MB to 700 MB uncompressed-equivalent, typically materially less on disk after parquet compression and repeated schemas.
 - Trade events are bursty and venue-dependent; expect small normal days and spikes during major events.
 
-Default activity filter estimate:
+Observed Phase 1 local validation:
 
-- Expected active markets after `$1,000` 24h volume OR spread `< $0.20`: 200-500 across both venues.
-- This is an educated guess. First-day operation should report actual pass/fail counts at `$100`, `$1,000`, and `$10,000`.
+- Polymarket, 200 tracked markets, 23-minute local soak: 25,600 WebSocket-sourced snapshots, 235 REST-sourced startup snapshots, 25,835 snapshots total, 203 distinct markets, memory flat near 334 MB, zero heartbeat errors, four WebSocket connections.
+- Kalshi, 7-day dry-run: 257 pages, 256,323 returned markets, 34 tracked markets after the activity filter.
+- Kalshi, 2-day narrowed subscription check: five tracked markets, REST order-book initialization succeeded, WebSocket returned `HTTP 401`, and the indexer logged `kalshi_ws_unavailable` once before continuing with REST-refreshed book state.
 
 Runway on the target `s-2vcpu-2gb` 60 GB tier:
 
@@ -128,7 +161,7 @@ Runway on the target `s-2vcpu-2gb` 60 GB tier:
 Memory:
 
 - Book state is bounded by `markets * depth * sides`.
-- 500 markets at depth 5 is only thousands of levels in memory; Python overhead should remain comfortably below the default 1024 MB ceiling.
+- 500 markets at depth 5 is only thousands of levels in memory; validated Polymarket-only capture stayed well below the default 1024 MB ceiling.
 - The writer force-flushes if process memory exceeds `--max-memory-mb`.
 
 ## Inspection Recipes
@@ -165,15 +198,17 @@ GROUP BY venue;
 
 ## Failure Modes
 
-- `*_ws_reconnect`: WebSocket dropout. The indexer backs off with jitter and refreshes full REST books before continuing.
+- `polymarket_ws_reconnect`: Polymarket WebSocket dropout. The indexer backs off with jitter and refreshes REST books before continuing.
+- `kalshi_ws_unavailable`: Kalshi WebSocket authentication failed or the endpoint is unavailable. The indexer disables Kalshi WebSocket for that run and continues with REST-initialized book state.
+- `kalshi_ws_reconnect`: Kalshi WebSocket reconnectable failure. The indexer backs off with jitter and refreshes REST books sequentially before continuing.
 - `forward_indexer_memory_ceiling_exceeded`: process memory exceeded `--max-memory-mb`; buffers were force-flushed.
 - Persistent HTTP 429s: venue public endpoints are rate-limiting. The indexer backs off up to 60 seconds; if persistent, stop and lower market scope.
-- Missing snapshots for a market: the market may have failed the activity filter, REST book initialization failed, or the WebSocket reconnect loop is stuck.
-- Parquet read failure: kill criterion. Any part that cannot be opened by `pyarrow.parquet.ParquetFile` should block merge/deploy.
+- Missing snapshots for a market: the market failed the activity filter, REST book initialization failed, or the WebSocket reconnect loop is stuck.
+- Parquet read failure: kill criterion. Any part that cannot be opened by `pyarrow.parquet.ParquetFile` blocks merge/deploy.
 
 ## Kill Criteria
 
-This phase should not be considered production-ready unless a target VPS soak test shows:
+This phase is production-ready only after a target VPS soak test shows:
 
 - 15-second emit cadence sustained on 200+ filtered markets for 1 hour.
 - WebSocket dropout rate below 5% per hour.
