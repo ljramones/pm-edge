@@ -28,7 +28,7 @@ data/raw/forward_index/
 
 The VPS stores only parquet. Completed parquet parts are synced to the laptop, where DuckDB reads them directly for analysis.
 
-Polymarket uses Gamma API discovery plus CLOB REST initialization and public CLOB WebSocket book deltas. Kalshi uses REST discovery and REST order-book refresh only in Phase 1. The documented Kalshi WebSocket endpoint requires signed API authentication and returned `HTTP 401` in unauthenticated local validation, so signed Kalshi WebSocket capture is deferred.
+Polymarket uses Gamma API discovery plus CLOB REST initialization and public CLOB WebSocket book deltas. Gamma discovery retries transient `429` and `5xx` page failures with bounded exponential backoff, then aborts the current discovery cycle gracefully if a page remains unavailable. Kalshi uses REST discovery and REST order-book refresh only in Phase 1. The documented Kalshi WebSocket endpoint requires signed API authentication and returned `HTTP 401` in unauthenticated local validation, so signed Kalshi WebSocket capture is deferred.
 
 ## Captured Tables
 
@@ -36,9 +36,11 @@ Every table includes `schema_version`.
 
 - `order_book_snapshots`: top-N bid/ask levels, top bid/ask, mid, spread, source.
 - `trade_events`: venue trade id when available, token/outcome id, price, size, side, timestamp.
-- `market_metadata_snapshots`: market lifecycle/status, 24h volume, liquidity, end date, raw venue JSON.
+- `market_metadata_snapshots`: market lifecycle/status, 24h volume, liquidity, end date, raw venue JSON for tracked post-filter markets only.
 
 Default book depth is 5 levels per side.
+
+Kalshi REST order books are parsed from the observed `orderbook_fp.yes_dollars` and `orderbook_fp.no_dollars` fields first. The parser keeps the older `yes`, `no`, `yes_bids`, and `no_bids` fallbacks for endpoint-shape variation.
 
 ## Discovery Filtering
 

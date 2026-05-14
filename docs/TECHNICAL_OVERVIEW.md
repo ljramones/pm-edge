@@ -26,8 +26,8 @@ The forward data layer is the current production data path for future strategy v
 
 The forward indexer covers both venues with different capture quality:
 
-- Polymarket: discovery uses the Gamma API with active/open filters. Order book state uses CLOB REST initialization plus the public CLOB WebSocket market feed for live book deltas. The validated 23-minute local soak on 200 tracked markets produced 25,600 WebSocket-sourced snapshots and 235 REST-sourced startup snapshots, with memory flat near 334 MB and zero heartbeat errors.
-- Kalshi: discovery uses the public REST market data API with `status=open` and a 7-day `max_close_ts` source filter to bound pagination. Book state is REST-refresh-only in the current deployment. The documented Kalshi WebSocket host returns `HTTP 401` without signed API authentication, so signed Kalshi WebSocket capture is deferred.
+- Polymarket: discovery uses the Gamma API with active/open filters. Gamma page requests retry transient `429` and `5xx` responses with bounded exponential backoff and abort the current discovery cycle gracefully on hard page failure. Order book state uses CLOB REST initialization plus the public CLOB WebSocket market feed for live book deltas. The validated 23-minute local soak on 200 tracked markets produced 25,600 WebSocket-sourced snapshots and 235 REST-sourced startup snapshots, with memory flat near 334 MB and zero heartbeat errors.
+- Kalshi: discovery uses the public REST market data API with `status=open` and a 7-day `max_close_ts` source filter to bound pagination. Book state is REST-refresh-only in the current deployment. REST book parsing uses the observed `orderbook_fp.yes_dollars` and `orderbook_fp.no_dollars` fields first, with legacy field fallbacks retained. The documented Kalshi WebSocket host returns `HTTP 401` without signed API authentication, so signed Kalshi WebSocket capture is deferred.
 
 Discovery uses a liquidity-focused activity filter before subscription. A market enters the tracked set only when all configured checks pass:
 
@@ -41,7 +41,7 @@ The forward data layer writes three parquet tables:
 
 - `order_book_snapshots`: top-N bid/ask levels, top bid/ask, mid, spread, snapshot source, and timestamp.
 - `trade_events`: venue trade id when available, token/outcome id, price, size, side, and timestamp.
-- `market_metadata_snapshots`: market status, 24h volume, liquidity, end date, raw venue metadata, and capture timestamp.
+- `market_metadata_snapshots`: market status, 24h volume, liquidity, end date, raw venue metadata, and capture timestamp for tracked post-filter markets.
 
 This data path replaces the pre-existing historical signal files as the basis for future strategy validation. See [Data Quality Lessons](DATA_QUALITY_LESSONS.md) for the account of why the legacy `signals_*.parquet` datasets cannot support strategy approval.
 
