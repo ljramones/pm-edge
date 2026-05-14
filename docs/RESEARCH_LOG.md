@@ -152,6 +152,47 @@ The realistic outcome distribution at this point:
 
 The strategic direction documented in this log raises the probability of outcome (a) and lowers the probability of outcome (b) relative to a pure price-only approach. It does not guarantee any specific outcome. The system is being built to discover the truth honestly, not to force a positive result.
 
+## Entry 9 — OpenEvolve tool assessment [TOOL ASSESSMENT, 2026-05-14]
+
+OpenEvolve is an open-source implementation of DeepMind's AlphaEvolve. It is Apache-2.0 licensed. Repository: github.com/algorithmicsuperintelligence/openevolve. The project is under active development, with 6.3k GitHub stars, 52 releases through March 2026, and regular maintenance.
+
+Mechanism: evolutionary algorithm where LLMs serve as the mutation operator. Initial program plus evaluator plus iteration budget produces a MAP-Elites quality-diversity population of evolved variants. Island-based architecture prevents premature convergence. The artifacts side-channel feeds execution errors back into subsequent generations as additional context for the LLM. OpenEvolve works with any OpenAI-compatible API, including local Ollama and vLLM endpoints.
+
+**Verified achievements:**
+
+- 2.8x speedup on Apple Silicon Metal attention kernels in the MLX optimization example.
+- Matches published state-of-the-art for the n=26 circle packing problem.
+- Measurable accuracy gains on prompt evolution: +23% on the HotpotQA benchmark.
+- Adaptive sorting algorithms in Rust.
+- Symbolic regression for automated equation discovery.
+
+**Applicable to current and planned work:**
+
+1. **Dynamis engine performance optimization.** Hot-function optimization with clear benchmarks. The MLX Metal kernel example is directly analogous to the Vulkan/MoltenVK and Metal optimization work in DLE. The MeshForge OBJ parser bottleneck is the obvious first candidate when this tool is picked up: already profiled, clear hot path, existing benchmark harness adaptable into an OpenEvolve evaluator.
+2. **LLM prompt optimization for the multi-agent workflow.** The architect/coding-agent loops in the existing manual orchestration depend on carefully crafted prompts. OpenEvolve's prompt-evolution support has measured improvements on benchmarks. It is worth attempting when a prompt feels almost-right-but-not-quite and the evaluator function for prompt quality is well-defined.
+3. **Specific algorithmic challenges with unambiguous fitness.** Pathfinding in TRIPS, procedural generation in the worldbuilding tools, mesh optimization: anywhere the fitness function is clear and the algorithm space is unfamiliar.
+
+**Not applicable to pm-edge strategy evolution:**
+
+- **Overfitting is catastrophic for trading strategies.** Evolutionary search inherently optimizes for the evaluation metric. With historical market data, sufficient search finds strategies that crush in-sample data and resolve to noise out-of-sample. MAP-Elites quality-diversity reduces but does not eliminate this. The pre-Phase-1 dataset failure modes documented in `DATA_QUALITY_LESSONS.md` are the same failure modes evolutionary search would amplify.
+- **The hard question in pm-edge is not "what code computes the answer" but "what should the answer even be."** Evolutionary code generation is powerful when fitness is unambiguous: faster runtime, smaller packing. It is dangerous when fitness is ambiguous and contestable, which is the entire situation in trading.
+- **The pm-edge methodology is the opposite approach.** Causal maps first, out-of-band signals, multi-timescale analysis, hand-built archetype evaluators. Evolutionary search would be a sophisticated way to fool oneself into believing in artifacts of the search rather than real signals.
+
+**Cost and integration notes:**
+
+- LLM API costs scale with iterations. A realistic optimization run costs about $20-100 in API calls for a few hundred iterations on a hot function. Local Ollama models are cheaper but slower.
+- The evaluator is the actual work. The framework handles orchestration; the user writes the fitness function. For Dynamis kernels this means accurate benchmarking harnesses with low variance.
+- Local-model compatibility aligns with the existing work-AI policy preference for local inference where practical.
+- No corporate dependency issues: Apache-2.0.
+
+**Decision: bookmarked, not adopted.**
+
+OpenEvolve is the right tool for a specific class of problem: well-defined fitness, hot-function optimization, prompt evolution. It is the wrong tool for another class: strategy discovery and ambiguous-fitness problems. The right shape of engagement is "I have a specific optimization problem with a clear evaluator; try OpenEvolve on it" rather than "preemptively integrate evolutionary code generation into the toolchain."
+
+First serious application is queued: when the MeshForge OBJ parser bottleneck is revisited, OpenEvolve gets a real trial. Until then, this is reference material.
+
+**Open question:** Whether OpenEvolve's prompt-evolution mode fits the system messages that eventually drive pm-edge's archetype evaluators. The reasoning is recursive: archetype evaluators use prompts; those prompts can be evolved; but the fitness function would be backtest performance on resolved markets, which carries the same overfitting risk as evolving the strategy code directly. Resolution requires more thought once archetype evaluators exist and produce measurable outputs. Flagged for revisit, not pursued now.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
