@@ -65,6 +65,7 @@ class PolymarketIndexer(VenueIndexer):
 
         markets: list[MarketDescriptor] = []
         cursor: str | None = None
+        skipped_pages = 0
         while True:
             params = {
                 "closed": "false",
@@ -80,10 +81,22 @@ class PolymarketIndexer(VenueIndexer):
             }
             if cursor:
                 params["after_cursor"] = cursor
-            payload = await self._request_json(
-                f"{self.gamma_url}/markets/keyset",
+            url = f"{self.gamma_url}/markets/keyset"
+            payload = await self._request_gamma_page(
+                url,
                 params=params,
+                cursor=cursor,
             )
+            if payload is None:
+                skipped_pages += 1
+                self._logger.error(
+                    "polymarket_discovery_aborted",
+                    cursor=cursor,
+                    url=url,
+                    markets_collected=len(markets),
+                    skipped_pages=skipped_pages,
+                )
+                break
             page = payload.get("data") or payload.get("markets") or []
             for item in page:
                 if not isinstance(item, dict):
@@ -97,6 +110,64 @@ class PolymarketIndexer(VenueIndexer):
             cursor = str(next_cursor)
         self._stats.markets_discovered = len(markets)
         return markets
+
+    async def _request_gamma_page(
+        self,
+        url: str,
+        *,
+        params: dict[str, str],
+        cursor: str | None,
+    ) -> dict[str, Any] | None:
+        """Fetch one Gamma discovery page with bounded transient retries."""
+
+        backoff = 1.0
+        max_retries = 6
+        max_attempts = max_retries + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await self.client.get(url, params=params)
+            except httpx.RequestError as exc:
+                self._stats.errors_since_heartbeat += 1
+                self._logger.warning(
+                    "polymarket_gamma_page_retry",
+                    attempt=attempt,
+                    cursor=cursor,
+                    error=str(exc),
+                    backoff=backoff,
+                    url=url,
+                )
+            else:
+                if response.status_code == 429 or response.status_code >= 500:
+                    self._stats.errors_since_heartbeat += 1
+                    self._logger.warning(
+                        "polymarket_gamma_page_retry",
+                        attempt=attempt,
+                        cursor=cursor,
+                        status_code=response.status_code,
+                        backoff=backoff,
+                        url=url,
+                    )
+                elif response.status_code >= 400:
+                    self._stats.errors_since_heartbeat += 1
+                    self._logger.error(
+                        "polymarket_gamma_page_failed",
+                        cursor=cursor,
+                        status_code=response.status_code,
+                        url=url,
+                    )
+                    return None
+                else:
+                    return dict(response.json())
+            if attempt < max_attempts:
+                await asyncio.sleep(backoff + random.uniform(0, backoff * 0.1))
+                backoff = min(backoff * 2, 30.0)
+        self._logger.error(
+            "polymarket_gamma_page_failed",
+            cursor=cursor,
+            attempts=max_attempts,
+            url=url,
+        )
+        return None
 
     async def subscribe_books(self, markets: list[MarketDescriptor]) -> None:
         """Subscribe to book diffs, with REST refresh on initial state and reconnect."""

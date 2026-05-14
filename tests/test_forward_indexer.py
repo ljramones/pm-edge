@@ -502,6 +502,62 @@ async def test_polymarket_discovery_retries_transient_request_error(
 
 
 @pytest.mark.asyncio
+async def test_polymarket_discovery_retries_gamma_500_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("data.forward_indexer.polymarket.asyncio.sleep", fast_sleep)
+    client = StatusSequenceAsyncClient(
+        [
+            (
+                200,
+                {
+                    "markets": [
+                        {
+                            "conditionId": "condition-1",
+                            "question": "First page",
+                            "clobTokenIds": '["yes-1", "no-1"]',
+                            "volumeNum": "2500",
+                        }
+                    ],
+                    "next_cursor": "cursor-2",
+                },
+            ),
+            (500, {"error": "transient"}),
+            (
+                200,
+                {
+                    "markets": [
+                        {
+                            "conditionId": "condition-2",
+                            "question": "Second page",
+                            "clobTokenIds": '["yes-2", "no-2"]',
+                            "volumeNum": "2500",
+                        }
+                    ],
+                    "next_cursor": None,
+                },
+            ),
+        ]
+    )
+    indexer = PolymarketIndexer(
+        base_url="https://clob.polymarket.com",
+        gamma_url="https://gamma-api.polymarket.com",
+        client=client,
+    )
+
+    markets = await indexer.discover_markets()
+
+    assert [market.market_id for market in markets] == ["condition-1", "condition-2"]
+    assert len(client.requests) == 3
+    assert client.requests[1]["params"]["after_cursor"] == "cursor-2"
+    assert client.requests[2]["params"]["after_cursor"] == "cursor-2"
+    assert indexer.stats().errors_since_heartbeat == 1
+
+
+@pytest.mark.asyncio
 async def test_polymarket_book_refresh_skips_stale_token_404() -> None:
     market = MarketDescriptor(
         venue="polymarket",
@@ -665,6 +721,42 @@ async def test_kalshi_discovery_paces_successful_rest_requests() -> None:
     assert 0.05 <= elapsed < 0.5
 
 
+@pytest.mark.asyncio
+async def test_kalshi_refresh_book_parses_orderbook_fp_dollar_fields() -> None:
+    market = MarketDescriptor(
+        venue="kalshi",
+        market_id="KXBTC",
+        question="Bitcoin",
+        token_id_yes="KXBTC:yes",
+        token_id_no="KXBTC:no",
+    )
+    client = RecordingAsyncClient(
+        [
+            {
+                "orderbook_fp": {
+                    "yes_dollars": [["0.0100", "109499.89"], ["0.0050", "10.00"]],
+                    "no_dollars": [["0.0200", "145.00"]],
+                }
+            }
+        ]
+    )
+    indexer = KalshiIndexer(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        client=client,
+        request_delay_seconds=0.0,
+    )
+
+    await indexer.refresh_book(market)
+
+    state = await indexer.current_book_state("KXBTC")
+    assert state is not None
+    snapshot = await state.snapshot()
+    assert snapshot["bid_levels"]
+    assert snapshot["ask_levels"]
+    assert snapshot["top_bid"] == 0.01
+    assert snapshot["top_ask"] == 0.98
+
+
 def test_kalshi_uses_dedicated_websocket_host_by_default() -> None:
     indexer = KalshiIndexer(
         base_url="https://external-api.kalshi.com/trade-api/v2",
@@ -787,6 +879,37 @@ async def test_discover_once_runs_venue_discovery_concurrently(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_discover_once_writes_metadata_only_for_tracked_markets(tmp_path: Path) -> None:
+    now = datetime.now(tz=UTC)
+    indexers: list[VenueIndexer] = [
+        StaticDiscoverIndexer(
+            venue="polymarket",
+            markets=tracked_and_untracked_markets("polymarket", now=now),
+        ),
+        StaticDiscoverIndexer(
+            venue="kalshi",
+            markets=tracked_and_untracked_markets("kalshi", now=now),
+        ),
+    ]
+    writer = BufferedParquetWriter(tmp_path, flush_max_records=100)
+    runner = IndexerRunner(
+        config=RunnerConfig(output_dir=tmp_path),
+        indexers=indexers,
+        writer=writer,
+    )
+
+    await runner.discover_once()
+
+    files = list((tmp_path / "market_metadata_snapshots").rglob("*.parquet"))
+    row_count = sum(pq.ParquetFile(path).metadata.num_rows for path in files)
+    assert row_count == 4
+    assert {venue: len(markets) for venue, markets in runner._tracked_markets.items()} == {
+        "polymarket": 2,
+        "kalshi": 2,
+    }
+
+
+@pytest.mark.asyncio
 async def test_runner_stop_interrupts_long_sleep(tmp_path: Path) -> None:
     runner = IndexerRunner(
         config=RunnerConfig(
@@ -834,6 +957,18 @@ class RecordingAsyncClient:
         return httpx.Response(200, json=payload, request=request)
 
 
+class StatusSequenceAsyncClient:
+    def __init__(self, responses: list[tuple[int, dict[str, Any]]]) -> None:
+        self.responses = responses
+        self.requests: list[dict[str, Any]] = []
+
+    async def get(self, url: str, params: dict[str, str] | None = None) -> httpx.Response:
+        self.requests.append({"url": url, "params": params or {}})
+        request = httpx.Request("GET", url)
+        status_code, payload = self.responses.pop(0)
+        return httpx.Response(status_code, json=payload, request=request)
+
+
 class FlakyRecordingAsyncClient(RecordingAsyncClient):
     async def get(self, url: str, params: dict[str, str] | None = None) -> httpx.Response:
         self.requests.append({"url": url, "params": params or {}})
@@ -865,6 +1000,9 @@ class RecordingLogger:
 
     def warning(self, event: str, **kwargs: Any) -> None:
         self.events.append(("warning", event, kwargs))
+
+    def error(self, event: str, **kwargs: Any) -> None:
+        self.events.append(("error", event, kwargs))
 
     def count(self, level: str, event: str) -> int:
         return sum(
@@ -973,3 +1111,60 @@ class SlowDiscoverIndexer(VenueIndexer):
 
     def stats(self) -> VenueStats:
         return self._stats
+
+
+class StaticDiscoverIndexer(VenueIndexer):
+    def __init__(self, *, venue: str, markets: list[MarketDescriptor]) -> None:
+        self.venue = venue
+        self.markets = markets
+        self._stats = VenueStats(venue=venue)
+
+    async def discover_markets(self) -> list[MarketDescriptor]:
+        return list(self.markets)
+
+    async def subscribe_books(self, markets: list[MarketDescriptor]) -> None:
+        raise AssertionError("metadata test should not subscribe")
+
+    async def subscribe_trades(self, markets: list[MarketDescriptor]) -> None:
+        raise AssertionError("metadata test should not subscribe")
+
+    async def current_book_state(self, market_id: str) -> BookState | None:
+        return None
+
+    async def flush_pending(self) -> None:
+        return None
+
+    def stats(self) -> VenueStats:
+        return self._stats
+
+
+def tracked_and_untracked_markets(venue: str, *, now: datetime) -> list[MarketDescriptor]:
+    markets = [
+        MarketDescriptor(
+            venue=venue,
+            market_id=f"{venue}-tracked-{idx}",
+            question="Tracked",
+            volume_24h=20_000,
+            liquidity=5_000,
+            spread=0.05,
+            last_trade_at=now - timedelta(hours=1),
+            created_at=now - timedelta(hours=2),
+            end_date=now + timedelta(hours=4),
+        )
+        for idx in range(2)
+    ]
+    markets.extend(
+        MarketDescriptor(
+            venue=venue,
+            market_id=f"{venue}-untracked-{idx}",
+            question="Untracked",
+            volume_24h=1_000,
+            liquidity=5_000,
+            spread=0.05,
+            last_trade_at=now - timedelta(hours=1),
+            created_at=now - timedelta(hours=2),
+            end_date=now + timedelta(hours=4),
+        )
+        for idx in range(8)
+    )
+    return markets

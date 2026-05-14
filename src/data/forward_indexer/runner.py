@@ -141,7 +141,7 @@ class IndexerRunner:
             tracked = ranked_markets(tracked)[: self.config.max_tracked_markets_per_venue]
             self._tracked_markets[indexer.venue] = tracked
             if not self.config.dry_run:
-                for chunk in _chunks(markets, 1_000):
+                for chunk in _chunks(tracked, 1_000):
                     metadata_rows = [
                         metadata_record(market, captured_at=captured_at) for market in chunk
                     ]

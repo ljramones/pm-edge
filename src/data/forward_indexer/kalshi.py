@@ -153,13 +153,19 @@ class KalshiIndexer(VenueIndexer):
         """Fetch the REST orderbook and reconstruct YES asks from NO bids."""
 
         payload = await self._request_json(f"{self.base_url}/markets/{market.market_id}/orderbook")
-        orderbook = (
-            payload.get("orderbook") if isinstance(payload.get("orderbook"), dict) else payload
-        )
+        orderbook_fp = payload.get("orderbook_fp")
+        orderbook = orderbook_fp if isinstance(orderbook_fp, dict) else None
+        if orderbook is None:
+            orderbook_payload = payload.get("orderbook")
+            orderbook = orderbook_payload if isinstance(orderbook_payload, dict) else payload
         if not isinstance(orderbook, dict):
             orderbook = {}
-        yes_bids = _levels_from_kalshi(orderbook.get("yes") or orderbook.get("yes_bids") or [])
-        no_bids = _levels_from_kalshi(orderbook.get("no") or orderbook.get("no_bids") or [])
+        yes_bids = _levels_from_kalshi(
+            orderbook.get("yes_dollars") or orderbook.get("yes") or orderbook.get("yes_bids") or []
+        )
+        no_bids = _levels_from_kalshi(
+            orderbook.get("no_dollars") or orderbook.get("no") or orderbook.get("no_bids") or []
+        )
         asks = [{"price": 1 - level["price"], "size": level["size"]} for level in no_bids]
         state = self.books.get(market.market_id)
         if state is None:
