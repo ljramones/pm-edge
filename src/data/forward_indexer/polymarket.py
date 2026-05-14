@@ -169,12 +169,7 @@ class PolymarketIndexer(VenueIndexer):
 
     async def _book_ws_loop(self, markets: list[MarketDescriptor]) -> None:
         backoff = 1.0
-        asset_ids = [
-            token_id
-            for market in markets
-            for token_id in (market.token_id_yes, market.token_id_no)
-            if token_id
-        ]
+        asset_ids = [market.token_id_yes for market in markets if market.token_id_yes]
         while not self._stop.is_set():
             try:
                 if self.ws_connect is None:
@@ -194,43 +189,77 @@ class PolymarketIndexer(VenueIndexer):
     async def _handle_ws_message(self, raw: str | bytes, markets: list[MarketDescriptor]) -> None:
         payload = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
         messages = payload if isinstance(payload, list) else [payload]
-        token_to_market = {
-            token_id: market
-            for market in markets
-            for token_id in (market.token_id_yes, market.token_id_no)
-            if token_id
-        }
+        token_to_market = {market.token_id_yes: market for market in markets if market.token_id_yes}
         for message in messages:
             if not isinstance(message, dict):
                 continue
             event_type = str(message.get("event_type") or message.get("type") or "").lower()
             token_id = str(message.get("asset_id") or message.get("token_id") or "")
             market = token_to_market.get(token_id)
-            if market is None:
-                continue
             if event_type in {"price_change", "book", "orderbook"}:
-                await self._apply_book_message(market, message)
+                await self._apply_book_message(message, token_to_market, market)
             elif event_type in {"trade", "last_trade_price"}:
+                if market is None:
+                    continue
                 self._append_trade(market, message, token_id)
 
-    async def _apply_book_message(self, market: MarketDescriptor, message: dict[str, Any]) -> None:
+    async def _apply_book_message(
+        self,
+        message: dict[str, Any],
+        token_to_market: dict[str, MarketDescriptor],
+        market: MarketDescriptor | None,
+    ) -> None:
+        if market is not None and (
+            message.get("bids") is not None or message.get("asks") is not None
+        ):
+            await self._replace_book_from_ws(market, message)
+            return
+        changes = message.get("changes") or message.get("price_changes") or []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            change_token_id = str(
+                change.get("asset_id")
+                or change.get("token_id")
+                or message.get("asset_id")
+                or message.get("token_id")
+                or ""
+            )
+            change_market = token_to_market.get(change_token_id)
+            if change_market is not None:
+                await self._apply_book_change(change_market, change)
+
+    async def _replace_book_from_ws(
+        self, market: MarketDescriptor, message: dict[str, Any]
+    ) -> None:
+        state = self.books.get(market.market_id)
+        if state is None:
+            state = BookState(
+                venue=self.venue,
+                market_id=market.market_id,
+                token_id_yes=market.token_id_yes,
+                token_id_no=market.token_id_no,
+                depth=self.depth,
+            )
+            self.books[market.market_id] = state
+        bids = _levels_from_payload(message.get("bids") or message.get("buys") or [])
+        asks = _levels_from_payload(message.get("asks") or message.get("sells") or [])
+        await state.replace(bids=bids, asks=asks, source="websocket")
+
+    async def _apply_book_change(self, market: MarketDescriptor, change: dict[str, Any]) -> None:
         state = self.books.get(market.market_id)
         if state is None:
             await self.refresh_book(market)
             state = self.books.get(market.market_id)
         if state is None:
             return
-        changes = message.get("changes") or message.get("price_changes") or []
-        for change in changes:
-            if not isinstance(change, dict):
-                continue
-            side = str(change.get("side") or change.get("book_side") or "").lower()
-            price = _float_or_none(change.get("price"))
-            size = _float_or_none(change.get("size"))
-            if price is None or size is None:
-                continue
-            book_side: BookSide = "bid" if side in {"buy", "bid", "bids"} else "ask"
-            await state.apply_diff(side=book_side, price=price, size=size, source="websocket")
+        side = str(change.get("side") or change.get("book_side") or "").lower()
+        price = _float_or_none(change.get("price"))
+        size = _float_or_none(change.get("size"))
+        if price is None or size is None:
+            return
+        book_side: BookSide = "bid" if side in {"buy", "bid", "bids"} else "ask"
+        await state.apply_diff(side=book_side, price=price, size=size, source="websocket")
 
     def _append_trade(
         self, market: MarketDescriptor, message: dict[str, Any], token_id: str

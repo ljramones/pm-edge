@@ -6,7 +6,7 @@ import asyncio
 import json
 import random
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -29,17 +29,18 @@ class KalshiIndexer(VenueIndexer):
         self,
         *,
         base_url: str,
+        ws_url: str | None = None,
         depth: int = 5,
         client: Any | None = None,
         ws_connect: WsConnect | None = None,
         request_delay_seconds: float = 0.2,
+        max_close_days: float | None = 7.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.ws_url = self.base_url.replace("https://", "wss://").replace(
-            "/trade-api/v2", "/trade-api/ws/v2"
-        )
+        self.ws_url = ws_url or _derive_ws_url(self.base_url)
         self.depth = depth
         self.request_delay = request_delay_seconds
+        self.max_close_days = max_close_days
         self.client = client or httpx.AsyncClient(timeout=20.0)
         self._owns_client = client is None
         self.ws_connect = ws_connect
@@ -61,21 +62,55 @@ class KalshiIndexer(VenueIndexer):
 
         markets: list[MarketDescriptor] = []
         cursor: str | None = None
+        max_close_ts = (
+            int((datetime.now(tz=UTC) + timedelta(days=self.max_close_days)).timestamp())
+            if self.max_close_days is not None
+            else None
+        )
+        page_number = 0
         while True:
             params = {"limit": "1000", "status": "open"}
+            if max_close_ts is not None:
+                params["max_close_ts"] = str(max_close_ts)
             if cursor:
                 params["cursor"] = cursor
             payload = await self._request_json(f"{self.base_url}/markets", params=params)
-            for item in payload.get("markets", []):
+            page_number += 1
+            items = payload.get("markets", [])
+            for item in items:
                 if isinstance(item, dict):
                     market = self._market_from_payload(item)
                     if market is not None:
                         markets.append(market)
             cursor_value = payload.get("cursor")
+            new_cursor = str(cursor_value) if cursor_value else None
+            cursor_repeated = new_cursor == cursor and new_cursor is not None
+            self._logger.debug(
+                "kalshi_discovery_page",
+                page=page_number,
+                page_size=len(items) if isinstance(items, list) else 0,
+                total_markets_so_far=len(markets),
+                cursor_repeated=cursor_repeated,
+                next_cursor_present=new_cursor is not None,
+            )
+            if cursor_repeated:
+                self._logger.warning(
+                    "kalshi_discovery_cursor_repeated",
+                    page=page_number,
+                    cursor=new_cursor,
+                    total_markets_so_far=len(markets),
+                )
+                break
             if not cursor_value:
                 break
             cursor = str(cursor_value)
         self._stats.markets_discovered = len(markets)
+        self._logger.info(
+            "kalshi_discovery_summary",
+            total_pages=page_number,
+            total_markets_returned=len(markets),
+            max_close_days_applied=self.max_close_days,
+        )
         return markets
 
     async def subscribe_books(self, markets: list[MarketDescriptor]) -> None:
@@ -167,10 +202,30 @@ class KalshiIndexer(VenueIndexer):
                     await self._handle_ws_message(raw, markets)
             except Exception as exc:
                 self._stats.errors_since_heartbeat += 1
+                if _is_permanent_ws_error(exc):
+                    self._stats.websocket_connections = 0
+                    self._logger.warning("kalshi_ws_unavailable", error=str(exc))
+                    return
                 self._logger.warning("kalshi_ws_reconnect", error=str(exc), backoff=backoff)
-                await asyncio.gather(*(self.refresh_book(market) for market in markets))
+                await self._refresh_books(markets)
                 await asyncio.sleep(backoff + random.uniform(0, backoff * 0.1))
                 backoff = min(backoff * 2, 60.0)
+
+    async def _refresh_books(self, markets: list[MarketDescriptor]) -> None:
+        """Refresh Kalshi books without bursting through REST rate limits."""
+
+        for market in markets:
+            if self._stop.is_set():
+                return
+            try:
+                await self.refresh_book(market)
+            except Exception as exc:
+                self._stats.errors_since_heartbeat += 1
+                self._logger.warning(
+                    "kalshi_book_refresh_failed",
+                    market_id=market.market_id,
+                    error=str(exc),
+                )
 
     async def _handle_ws_message(self, raw: str | bytes, markets: list[MarketDescriptor]) -> None:
         payload = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
@@ -293,6 +348,21 @@ def _levels_from_kalshi(levels: list[Any]) -> list[dict[str, float]]:
             price = price / 100
         output.append({"price": price, "size": size})
     return output
+
+
+def _derive_ws_url(base_url: str) -> str:
+    """Return Kalshi's dedicated WebSocket URL for a REST base URL."""
+
+    if "demo" in base_url:
+        return "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
+    return "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+
+
+def _is_permanent_ws_error(exc: Exception) -> bool:
+    """Return whether a WebSocket error should not be retried unauthenticated."""
+
+    message = str(exc)
+    return any(status in message for status in ("HTTP 401", "HTTP 403", "HTTP 404"))
 
 
 def _normalized_price(value: Any) -> float | None:

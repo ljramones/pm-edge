@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pyarrow.parquet as pq
@@ -80,6 +81,42 @@ async def test_deduplication_on_resume(tmp_path: Path) -> None:
     files = await asyncio.to_thread(lambda: list(Path(tmp_path).rglob("*.parquet")))
     assert len(files) == 1
     assert pq.ParquetFile(files[0]).metadata.num_rows == 1
+
+
+@pytest.mark.asyncio
+async def test_writer_bounds_seen_key_cache(tmp_path: Path) -> None:
+    writer = BufferedParquetWriter(
+        tmp_path,
+        flush_max_records=100,
+        max_seen_keys_per_table=2,
+    )
+    base_record = {
+        "schema_version": SCHEMA_VERSION,
+        "venue": "polymarket",
+        "token_id_yes": "yes",
+        "token_id_no": "no",
+        "bid_levels": [{"price": 0.49, "size": 10.0}],
+        "ask_levels": [{"price": 0.51, "size": 10.0}],
+        "top_bid": 0.49,
+        "top_ask": 0.51,
+        "mid": 0.5,
+        "spread": 0.02,
+        "snapshot_source": "rest",
+    }
+    records = [
+        {
+            **base_record,
+            "market_id": f"m{idx}",
+            "timestamp_utc": datetime(2026, 5, 13, 12, idx, tzinfo=UTC),
+        }
+        for idx in range(3)
+    ]
+
+    assert await writer.add_records(TableName.ORDER_BOOK_SNAPSHOTS, records) == 3
+    assert writer.seen_key_count == 2
+    assert await writer.add_records(TableName.ORDER_BOOK_SNAPSHOTS, [records[-1]]) == 0
+    assert await writer.add_records(TableName.ORDER_BOOK_SNAPSHOTS, [records[0]]) == 1
+    assert writer.seen_key_count == 2
 
 
 @pytest.mark.asyncio
@@ -310,7 +347,81 @@ async def test_websocket_mock_dropout_reconnect_updates_book_state() -> None:
     assert state is not None
     snapshot = await state.snapshot()
     assert snapshot["top_bid"] in {0.5, 0.51}
+    assert snapshot["snapshot_source"] == "websocket"
     assert ws_factory.connection_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_polymarket_price_change_uses_change_asset_id() -> None:
+    market = MarketDescriptor(
+        venue="polymarket",
+        market_id="m1",
+        question="Test",
+        token_id_yes="yes-token",
+        token_id_no="no-token",
+    )
+    indexer = PolymarketIndexer(
+        base_url="https://clob.polymarket.com",
+        client=MockAsyncClient(),
+    )
+    await indexer.refresh_book(market)
+
+    await indexer._handle_ws_message(
+        json.dumps(
+            {
+                "event_type": "price_change",
+                "changes": [
+                    {
+                        "asset_id": "yes-token",
+                        "side": "bid",
+                        "price": "0.55",
+                        "size": "7",
+                    }
+                ],
+            }
+        ),
+        [market],
+    )
+
+    state = await indexer.current_book_state("m1")
+    assert state is not None
+    snapshot = await state.snapshot()
+    assert snapshot["top_bid"] == 0.55
+    assert snapshot["snapshot_source"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_polymarket_book_message_replaces_state_from_websocket() -> None:
+    market = MarketDescriptor(
+        venue="polymarket",
+        market_id="m1",
+        question="Test",
+        token_id_yes="yes-token",
+        token_id_no="no-token",
+    )
+    indexer = PolymarketIndexer(
+        base_url="https://clob.polymarket.com",
+        client=MockAsyncClient(),
+    )
+
+    await indexer._handle_ws_message(
+        json.dumps(
+            {
+                "event_type": "book",
+                "asset_id": "yes-token",
+                "bids": [{"price": "0.44", "size": "9"}],
+                "asks": [{"price": "0.48", "size": "11"}],
+            }
+        ),
+        [market],
+    )
+
+    state = await indexer.current_book_state("m1")
+    assert state is not None
+    snapshot = await state.snapshot()
+    assert snapshot["top_bid"] == 0.44
+    assert snapshot["top_ask"] == 0.48
+    assert snapshot["snapshot_source"] == "websocket"
 
 
 @pytest.mark.asyncio
@@ -441,6 +552,91 @@ async def test_kalshi_discovery_includes_open_status_filter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_kalshi_discovery_includes_max_close_ts_filter() -> None:
+    client = RecordingAsyncClient([{"markets": [], "cursor": ""}])
+    indexer = KalshiIndexer(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        client=client,
+        request_delay_seconds=0.0,
+        max_close_days=14.0,
+    )
+    before = int((datetime.now(tz=UTC) + timedelta(days=14)).timestamp())
+
+    await indexer.discover_markets()
+
+    after = int((datetime.now(tz=UTC) + timedelta(days=14)).timestamp())
+    max_close_ts = int(client.requests[0]["params"]["max_close_ts"])
+    assert before - 60 <= max_close_ts <= after + 60
+
+
+@pytest.mark.asyncio
+async def test_kalshi_discovery_omits_max_close_ts_when_disabled() -> None:
+    client = RecordingAsyncClient([{"markets": [], "cursor": ""}])
+    indexer = KalshiIndexer(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        client=client,
+        request_delay_seconds=0.0,
+        max_close_days=None,
+    )
+
+    await indexer.discover_markets()
+
+    assert "max_close_ts" not in client.requests[0]["params"]
+
+
+@pytest.mark.asyncio
+async def test_kalshi_discovery_breaks_on_repeated_cursor() -> None:
+    client = RecordingAsyncClient(
+        [
+            {
+                "markets": [{"ticker": "KXBTC1", "title": "Bitcoin 1", "status": "open"}],
+                "cursor": "same-cursor",
+            },
+            {
+                "markets": [{"ticker": "KXBTC2", "title": "Bitcoin 2", "status": "open"}],
+                "cursor": "same-cursor",
+            },
+            {
+                "markets": [{"ticker": "KXBTC3", "title": "Bitcoin 3", "status": "open"}],
+                "cursor": "",
+            },
+        ]
+    )
+    indexer = KalshiIndexer(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        client=client,
+        request_delay_seconds=0.0,
+    )
+    logger = RecordingLogger()
+    indexer._logger = cast(Any, logger)
+
+    started = time.perf_counter()
+    markets = await indexer.discover_markets()
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0
+    assert [market.market_id for market in markets] == ["KXBTC1", "KXBTC2"]
+    assert len(client.requests) == 2
+    assert logger.count("warning", "kalshi_discovery_cursor_repeated") == 1
+
+
+@pytest.mark.asyncio
+async def test_kalshi_discovery_emits_one_summary_log() -> None:
+    client = RecordingAsyncClient([{"markets": [], "cursor": ""}])
+    indexer = KalshiIndexer(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        client=client,
+        request_delay_seconds=0.0,
+    )
+    logger = RecordingLogger()
+    indexer._logger = cast(Any, logger)
+
+    await indexer.discover_markets()
+
+    assert logger.count("info", "kalshi_discovery_summary") == 1
+
+
+@pytest.mark.asyncio
 async def test_kalshi_discovery_paces_successful_rest_requests() -> None:
     client = RecordingAsyncClient(
         [
@@ -469,6 +665,76 @@ async def test_kalshi_discovery_paces_successful_rest_requests() -> None:
     assert 0.05 <= elapsed < 0.5
 
 
+def test_kalshi_uses_dedicated_websocket_host_by_default() -> None:
+    indexer = KalshiIndexer(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        client=RecordingAsyncClient([]),
+        request_delay_seconds=0.0,
+    )
+
+    assert indexer.ws_url == "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+
+
+async def raise_async(exc: Exception) -> Any:
+    raise exc
+
+
+@pytest.mark.asyncio
+async def test_kalshi_bulk_refresh_is_sequential(monkeypatch: pytest.MonkeyPatch) -> None:
+    indexer = KalshiIndexer(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        client=RecordingAsyncClient([]),
+        request_delay_seconds=0.0,
+    )
+    markets = [
+        MarketDescriptor(venue="kalshi", market_id=f"KX{idx}", question="Test") for idx in range(5)
+    ]
+    active = 0
+    max_active = 0
+
+    async def fake_refresh(_market: MarketDescriptor) -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+
+    monkeypatch.setattr(indexer, "refresh_book", fake_refresh)
+
+    await indexer._refresh_books(markets)
+
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_kalshi_permanent_websocket_error_does_not_reconnect_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    indexer = KalshiIndexer(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        client=RecordingAsyncClient([]),
+        request_delay_seconds=0.0,
+        ws_connect=lambda _url: raise_async(ConnectionError("HTTP 401")),
+    )
+    markets = [
+        MarketDescriptor(venue="kalshi", market_id=f"KX{idx}", question="Test") for idx in range(3)
+    ]
+    refresh_count = 0
+    logger = RecordingLogger()
+    indexer._logger = cast(Any, logger)
+
+    async def fake_refresh(_market: MarketDescriptor) -> None:
+        nonlocal refresh_count
+        refresh_count += 1
+
+    monkeypatch.setattr(indexer, "refresh_book", fake_refresh)
+
+    await indexer.subscribe_books(markets)
+
+    assert refresh_count == len(markets)
+    assert logger.count("warning", "kalshi_ws_unavailable") == 1
+
+
 @pytest.mark.asyncio
 async def test_forward_index_dry_run_smoke(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import scripts.forward_index as cli
@@ -490,7 +756,9 @@ async def test_forward_index_dry_run_smoke(monkeypatch: pytest.MonkeyPatch, tmp_
         http_timeout_seconds = 1
         polymarket_base_url = "https://clob.polymarket.com"
         kalshi_base_url = "https://external-api.kalshi.com/trade-api/v2"
+        kalshi_ws_url = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
         kalshi_request_delay_seconds = 0.0
+        kalshi_max_close_days = 7.0
 
     monkeypatch.setattr(cli, "get_settings", lambda: Settings())
     monkeypatch.setattr(sys, "argv", ["forward_index.py", "--dry-run", "--venues", "polymarket"])
@@ -583,6 +851,27 @@ class StatusCodeAsyncClient:
     async def get(self, url: str, params: dict[str, str] | None = None) -> httpx.Response:
         request = httpx.Request("GET", url)
         return httpx.Response(self.status_code, json={}, request=request)
+
+
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict[str, Any]]] = []
+
+    def debug(self, event: str, **kwargs: Any) -> None:
+        self.events.append(("debug", event, kwargs))
+
+    def info(self, event: str, **kwargs: Any) -> None:
+        self.events.append(("info", event, kwargs))
+
+    def warning(self, event: str, **kwargs: Any) -> None:
+        self.events.append(("warning", event, kwargs))
+
+    def count(self, level: str, event: str) -> int:
+        return sum(
+            1
+            for item_level, item_event, _ in self.events
+            if (item_level, item_event) == (level, event)
+        )
 
 
 class FakeWs:

@@ -79,6 +79,17 @@ def parse_args() -> argparse.Namespace:
         default=settings.forward_indexer_max_memory_mb,
     )
     parser.add_argument(
+        "--kalshi-max-close-days",
+        type=float,
+        default=settings.kalshi_max_close_days,
+        help="Only discover Kalshi markets closing within this many days.",
+    )
+    parser.add_argument(
+        "--no-kalshi-max-close-days",
+        action="store_true",
+        help="Disable the Kalshi max_close_ts source filter.",
+    )
+    parser.add_argument(
         "--polling-mode",
         action="store_true",
         help="Diagnostic mode: disable WebSockets and poll REST books on the emit cadence.",
@@ -108,6 +119,7 @@ async def run() -> None:
     selected_venues = {venue.strip().lower() for venue in args.venues.split(",") if venue.strip()}
     client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
     ws_connect = None if args.polling_mode else websocket_connect
+    kalshi_max_close_days = None if args.no_kalshi_max_close_days else args.kalshi_max_close_days
     indexers: list[VenueIndexer] = []
     if "polymarket" in selected_venues:
         indexers.append(
@@ -123,10 +135,12 @@ async def run() -> None:
         indexers.append(
             KalshiIndexer(
                 base_url=settings.kalshi_base_url,
+                ws_url=settings.kalshi_ws_url,
                 depth=args.book_depth_levels,
                 client=client,
                 ws_connect=ws_connect,
                 request_delay_seconds=settings.kalshi_request_delay_seconds,
+                max_close_days=kalshi_max_close_days,
             )
         )
     config = RunnerConfig(

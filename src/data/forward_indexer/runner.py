@@ -224,6 +224,7 @@ class IndexerRunner:
                     "forward_indexer_memory_ceiling_exceeded",
                     memory_mb=memory_mb,
                     max_memory_mb=self.config.max_memory_mb,
+                    dedupe_keys_retained=self.writer.seen_key_count,
                 )
                 await self.writer.flush()
             if await self._sleep_or_stop(self.config.emit_cadence_seconds):
@@ -245,6 +246,7 @@ class IndexerRunner:
                     item.stats().websocket_connections for item in self.indexers
                 ),
                 memory_mb=round(current_memory_mb(), 2),
+                dedupe_keys_retained=self.writer.seen_key_count,
                 errors_since_last_heartbeat=sum(
                     item.stats().errors_since_heartbeat for item in self.indexers
                 ),

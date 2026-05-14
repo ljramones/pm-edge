@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -24,12 +24,16 @@ class BufferedParquetWriter:
         *,
         flush_max_records: int = 5_000,
         flush_interval_seconds: float = 30.0,
+        max_seen_keys_per_table: int = 20_000,
     ) -> None:
         self.output_dir = output_dir
         self.flush_max_records = flush_max_records
         self.flush_interval_seconds = flush_interval_seconds
+        self.max_seen_keys_per_table = max_seen_keys_per_table
         self._buffers: dict[TableName, list[dict[str, Any]]] = defaultdict(list)
-        self._seen_keys: dict[TableName, set[tuple[Any, ...]]] = defaultdict(set)
+        self._seen_keys: dict[TableName, OrderedDict[tuple[Any, ...], None]] = defaultdict(
+            OrderedDict
+        )
         self._last_flush = datetime.now(tz=UTC)
         self._lock = asyncio.Lock()
 
@@ -38,12 +42,25 @@ class BufferedParquetWriter:
 
         today = current_date or datetime.now(tz=UTC).date()
         for table in TableName:
-            for path in self.output_dir.glob(
-                f"{table.value}/venue=*/date={today.isoformat()}/*.parquet"
-            ):
-                parquet = pq.ParquetFile(path).read()
-                for row in parquet.to_pylist():
-                    self._seen_keys[table].add(record_key(table, row))
+            paths = sorted(
+                self.output_dir.glob(f"{table.value}/venue=*/date={today.isoformat()}/*.parquet"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for path in paths:
+                parquet = pq.ParquetFile(path)
+                for batch in parquet.iter_batches(
+                    batch_size=2_048,
+                    columns=record_key_columns(table),
+                ):
+                    for row in batch.to_pylist():
+                        self._remember_key(table, record_key(table, row))
+                        if len(self._seen_keys[table]) >= self.max_seen_keys_per_table:
+                            break
+                    if len(self._seen_keys[table]) >= self.max_seen_keys_per_table:
+                        break
+                if len(self._seen_keys[table]) >= self.max_seen_keys_per_table:
+                    break
 
     async def add_records(self, table: TableName, records: list[dict[str, Any]]) -> int:
         """Add records to an in-memory buffer and return accepted count."""
@@ -54,7 +71,7 @@ class BufferedParquetWriter:
                 key = record_key(table, record)
                 if key in self._seen_keys[table]:
                     continue
-                self._seen_keys[table].add(key)
+                self._remember_key(table, key)
                 self._buffers[table].append(record)
                 accepted += 1
                 if self.pending_record_count >= self.flush_max_records:
@@ -81,6 +98,12 @@ class BufferedParquetWriter:
 
         elapsed = (datetime.now(tz=UTC) - self._last_flush).total_seconds()
         return elapsed >= self.flush_interval_seconds
+
+    @property
+    def seen_key_count(self) -> int:
+        """Return the total number of retained dedupe keys."""
+
+        return sum(len(keys) for keys in self._seen_keys.values())
 
     def partition_dir(self, table: TableName, *, venue: str, timestamp: datetime) -> Path:
         """Return the partition directory for a record."""
@@ -115,6 +138,15 @@ class BufferedParquetWriter:
         self._last_flush = datetime.now(tz=UTC)
         return flushed
 
+    def _remember_key(self, table: TableName, key: tuple[Any, ...]) -> None:
+        seen = self._seen_keys[table]
+        if key in seen:
+            seen.move_to_end(key)
+            return
+        seen[key] = None
+        while len(seen) > self.max_seen_keys_per_table:
+            seen.popitem(last=False)
+
 
 def record_key(table: TableName, record: dict[str, Any]) -> tuple[Any, ...]:
     """Return the idempotency key for one record."""
@@ -144,6 +176,27 @@ def record_key(table: TableName, record: dict[str, Any]) -> tuple[Any, ...]:
             record.get("market_id"),
             _timestamp_key(record.get("captured_at_utc")),
         )
+    raise ValueError(f"Unsupported table: {table}")
+
+
+def record_key_columns(table: TableName) -> list[str]:
+    """Return the minimum parquet columns needed to reconstruct idempotency keys."""
+
+    if table is TableName.ORDER_BOOK_SNAPSHOTS:
+        return ["venue", "market_id", "timestamp_utc"]
+    if table is TableName.TRADE_EVENTS:
+        return [
+            "venue",
+            "market_id",
+            "token_id",
+            "timestamp_utc",
+            "price",
+            "size",
+            "side",
+            "trade_id_venue",
+        ]
+    if table is TableName.MARKET_METADATA_SNAPSHOTS:
+        return ["venue", "market_id", "captured_at_utc"]
     raise ValueError(f"Unsupported table: {table}")
 
 

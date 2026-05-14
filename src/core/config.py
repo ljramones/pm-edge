@@ -50,7 +50,9 @@ class Settings(BaseSettings):
     kalshi_api_key: SecretStr | None = None
     kalshi_api_secret: SecretStr | None = None
     kalshi_base_url: str = "https://external-api.kalshi.com/trade-api/v2"
+    kalshi_ws_url: str = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
     kalshi_request_delay_seconds: float = Field(default=0.2, ge=0.0)
+    kalshi_max_close_days: float | None = Field(default=7.0, ge=0.0)
 
     news_api_key: SecretStr | None = None
     etherscan_api_key: SecretStr | None = None
