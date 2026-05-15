@@ -2,6 +2,8 @@
 
 This directory contains exploratory notebooks for the forward-indexer parquet archive synced to the laptop.
 
+For the full VPS-to-laptop operating model, including status-page setup and rsync cadence, see [Operations Runbook](../docs/OPERATIONS.md).
+
 ## Naming
 
 Notebook filenames use:

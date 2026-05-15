@@ -12,6 +12,8 @@ The forward data layer is now deployed for Phase 1 capture. The repo still conta
 
 For a detailed architecture and implementation walkthrough, see [Technical Overview](docs/TECHNICAL_OVERVIEW.md).
 
+For day-to-day producer monitoring, laptop sync, and notebook workflow, see [Operations Runbook](docs/OPERATIONS.md).
+
 For the data-quality record explaining why the legacy signals dataset was rejected, see [Data Quality Lessons](docs/DATA_QUALITY_LESSONS.md).
 
 For the latest enhanced-feature validation, see [Feature Engineering Impact Report](docs/FEATURE_ENGINEERING_IMPACT_REPORT.md).

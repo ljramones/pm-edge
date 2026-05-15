@@ -30,6 +30,8 @@ The VPS stores only parquet. Completed parquet parts are synced to the laptop, w
 
 Polymarket uses Gamma API discovery plus CLOB REST initialization and public CLOB WebSocket book deltas. Gamma discovery retries transient `429` and `5xx` page failures with bounded exponential backoff, then aborts the current discovery cycle gracefully if a page remains unavailable. Kalshi uses REST discovery and REST order-book refresh only in Phase 1. The documented Kalshi WebSocket endpoint requires signed API authentication and returned `HTTP 401` in unauthenticated local validation, so signed Kalshi WebSocket capture is deferred.
 
+For the end-to-end operating model, including the VPS status page, laptop rsync, and notebook workflow, see [Operations Runbook](OPERATIONS.md).
+
 ## Captured Tables
 
 Every table includes `schema_version`.
@@ -131,7 +133,7 @@ PM_EDGE_VPS_HOST=pmedge@YOUR_DROPLET_IP \
   bash deploy/forward_indexer/rsync_to_laptop.sh
 ```
 
-The script is idempotent and uses `--ignore-existing` so completed parquet parts are not re-copied.
+The script is idempotent and uses rsync size/mtime checks instead of `--ignore-existing`, so unchanged parquet parts are not re-copied and interrupted partial transfers can be repaired on the next run.
 
 ## Capacity Estimate
 
