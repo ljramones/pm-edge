@@ -8,6 +8,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from core.config import get_settings  # type: ignore[import-untyped]
 from scripts import ops_status
 
 
@@ -129,6 +130,17 @@ def test_systemctl_error_shows_unknown_service(
 
     html = output.read_text(encoding="utf-8")
     assert "<th>Active state</th><td>unknown</td>" in html
+
+
+def test_default_memory_cap_loads_from_env_file(monkeypatch: Any, tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=2048\n")
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+
+    try:
+        assert ops_status.default_memory_cap_mb() == 2048
+    finally:
+        get_settings.cache_clear()
 
 
 def write_snapshot_parquet(data_dir: Path, rows: list[dict[str, Any]]) -> None:

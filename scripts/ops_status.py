@@ -14,15 +14,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, cast
 
 import duckdb
 from jinja2 import Template
 
+from core.config import get_settings  # type: ignore[import-untyped]
+
 DEFAULT_DATA_DIR = Path("/opt/pm-edge/data/raw/forward_index")
 DEFAULT_OUTPUT = Path("/opt/pm-edge/data/ops_status.html")
 DEFAULT_SERVICE_NAME = "forward-indexer"
-DEFAULT_MEMORY_CAP_MB = 768.0
 
 TABLES = ("order_book_snapshots", "trade_events", "market_metadata_snapshots")
 WINDOWS = (1, 6, 24)
@@ -140,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--service", default=DEFAULT_SERVICE_NAME)
-    parser.add_argument("--memory-cap-mb", type=float, default=DEFAULT_MEMORY_CAP_MB)
+    parser.add_argument("--memory-cap-mb", type=float, default=default_memory_cap_mb())
     args = parser.parse_args(argv)
 
     started = time.perf_counter()
@@ -165,16 +166,17 @@ def build_status_html(
     *,
     data_dir: Path,
     service_name: str = DEFAULT_SERVICE_NAME,
-    memory_cap_mb: float = DEFAULT_MEMORY_CAP_MB,
+    memory_cap_mb: float | None = None,
 ) -> str:
     """Collect status data and render the HTML page."""
 
     now = datetime.now(tz=UTC)
+    cap = memory_cap_mb if memory_cap_mb is not None else default_memory_cap_mb()
     con = duckdb.connect()
     context = {
         "generated_at": now.isoformat(),
-        "memory_cap_mb": round(memory_cap_mb, 2),
-        "service": get_service_health(service_name, memory_cap_mb, now=now),
+        "memory_cap_mb": round(cap, 2),
+        "service": get_service_health(service_name, cap, now=now),
         "heartbeat": heartbeat_summary(service_name, now=now),
         "capture": capture_rate_summary(con, data_dir, now),
         "storage": storage_summary(data_dir, now),
@@ -182,6 +184,12 @@ def build_status_html(
         "errors": error_log_summary(service_name),
     }
     return Template(HTML_TEMPLATE).render(**context)
+
+
+def default_memory_cap_mb() -> float:
+    """Return the forward indexer's configured memory cap."""
+
+    return cast(float, get_settings().forward_indexer_max_memory_mb)
 
 
 def get_service_health(
