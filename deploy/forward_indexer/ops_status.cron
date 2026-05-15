@@ -1,0 +1,11 @@
+# Recommended cron entry for the pm-edge forward indexer status page.
+#
+# Run every 5 minutes, write status page to default location.
+# Logs to syslog automatically via cron.
+#
+# */5 * * * * /opt/pm-edge/.venv/bin/python /opt/pm-edge/scripts/ops_status.py >> /opt/pm-edge/data/ops_status.log 2>&1
+#
+# Then serve the status page via simple HTTP for browser viewing:
+# run in tmux or as a systemd service; a companion systemd unit is out of scope here.
+#
+# python -m http.server 8080 --directory /opt/pm-edge/data

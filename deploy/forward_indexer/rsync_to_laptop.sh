@@ -6,6 +6,6 @@ REMOTE_DIR="${PM_EDGE_REMOTE_FORWARD_INDEX_DIR:-/opt/pm-edge/data/raw/forward_in
 LOCAL_DIR="${PM_EDGE_LOCAL_FORWARD_INDEX_DIR:-data/raw/forward_index/}"
 
 mkdir -p "${LOCAL_DIR}"
-rsync -avz --partial --ignore-existing \
+rsync -avz --partial \
   "${VPS_HOST}:${REMOTE_DIR}" \
   "${LOCAL_DIR}"

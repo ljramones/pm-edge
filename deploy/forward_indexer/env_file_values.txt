@@ -1,0 +1,2 @@
+export PM_EDGE_VPS_HOST="pmedge@165.245.235.75"
+export PM_EDGE_LOCAL_FORWARD_INDEX_DIR="$HOME/pm-edge-data"
