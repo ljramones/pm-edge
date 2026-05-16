@@ -244,6 +244,161 @@ Criteria: at least 100 snapshots, observed top-book movement, mean spread no gre
 
 This assessment marks the project as materially past the pre-Phase-1 data-quality failure mode. The data is now honest enough to reveal its own limitations, which is different from the legacy signals dataset where the limitations were hidden inside derived features and fallback paths.
 
+## Entry 11 — Execution simulator v0 [INFRASTRUCTURE, 2026-05-16]
+
+**Context**
+
+Built v0 execution simulator per `docs/EXECUTION_SIMULATOR_DESIGN.md`. Goal: reproduce what would have happened to a hypothetical order placed against historical prediction-market book state, as the foundation for future strategy validation work.
+
+**Module structure**
+
+New top-level module at `src/execution_simulator/` containing config, types, book lookup, fill logic, assumption validation, and the public `simulate_order()` / `simulate_strategy()` entry points. It is a sibling to `src/data/`: a consumer of the data archive, not part of the data pipeline.
+
+**v0 scope and deferrals**
+
+v0 implements marketable order fills against the top of the opposing side with conservative defaults: full-spread slippage, `max_book_age_seconds=60`, taker fees at venue maximum, and no resting-order fills under the worst-case queue assumption.
+
+Out of scope for v0 and deferred to v1:
+
+- Depth walking.
+- Queue position modeling.
+- Fee calibration.
+- Partial-fill resting logic.
+- Latency simulation.
+- Multi-leg orders.
+
+**Conservative-by-default principle**
+
+Every modeling choice that has a more-optimistic and more-pessimistic interpretation defaults to the pessimistic. This is documented in `EXECUTION_SIMULATOR_DESIGN.md` with explicit rationale. The simulator is designed to systematically underestimate, not overestimate, real-trader achievable performance.
+
+**Assumption validation suite**
+
+Five empirical checks run against the local archive, each tied to a specific simulator assumption with a documented threshold:
+
+- `top_of_book_completeness`: at least `70%`.
+- `trade_within_spread_rate`: at least `80%`.
+- `book_staleness_rate`: no more than `10%`.
+- `bid_ask_cross_rate`: no more than `0.1%`.
+- `depth_dependency_rate`: quantified.
+
+The suite runs as part of `simulate_strategy()` output so users always see assumption health alongside simulation results.
+
+**Testing**
+
+17 new tests cover types, book lookup, fill logic, end-to-end simulation, and assumption validation. Full test suite at implementation time: `150 passed`.
+
+**End-to-end verification**
+
+Manual smoke test against the real archive at `/Users/larrymitchell/pm-edge-data/forward_index`: 10 synthesized Polymarket orders produced 10 valid `FillOutcome` objects. The pipeline works end-to-end.
+
+**Initial assumption suite result**
+
+`trade_within_spread_rate` reported `0.7026`, failing against the `0.80` threshold and prompting Entry 12 investigation.
+
+**What this unlocks**
+
+Paper strategy testing against simulated fills, with documented conservative bias and assumption-health reporting.
+
+**What it does not unlock**
+
+Production fill expectations or PnL claims. v1 gaps, especially depth walking, are real and quantified in Entry 13.
+
+## Entry 12 — Validator full-archive scan fix [INFRASTRUCTURE, 2026-05-16]
+
+**Context**
+
+Entry 11's initial assumption suite reported `trade_within_spread_rate=0.7026`, below the `0.80` threshold. Investigation determined this was a sampling issue in the validator, not a simulator modeling issue.
+
+**Investigation**
+
+Decomposition by classification and snapshot lag revealed:
+
+- Out-of-spread trades (`above_top_ask`, `below_top_bid`): average lag `4,500-5,100s`.
+- Within-spread trades: average lag `578s`.
+- Filtering to fresh snapshots, no more than `60s` lag to match the simulator default: `85.4%` within-spread rate, PASS.
+
+The validator was scanning only the 128 most-recently-modified parquet files, a deliberate but undocumented performance optimization by the implementing agent. This produced a sample of about `1,650` trades versus about `52,000` trades available in the full archive. Sample size was insufficient for stable rate estimation, and the file-mtime sort introduced selection bias between `trade_events` and `order_book_snapshots` views.
+
+**Fix**
+
+Replaced the file-sampling logic in `_create_table_or_empty()` with a recursive parquet glob that scans the entire archive. Removed `_latest_partition_paths()` and `_parquet_list_sql()` entirely.
+
+**Verification after fix**
+
+Real archive run with full scan:
+
+- Runtime: `16.31s`, acceptable for an infrequently run check.
+- `trade_within_spread_rate`: `0.8411`, PASS.
+- `top_of_book_completeness`: `0.8094`, PASS.
+- `book_staleness_rate`: `0.0000`, PASS.
+- `bid_ask_cross_rate`: `0.0000`, PASS.
+- `depth_dependency_rate`: `0.1032`, quantified.
+
+**Methodological note**
+
+The investigation followed the principle of empirical decomposition before changing the simulator. The simulator's conservative defaults turned out to be appropriate; the validator was reporting a misleadingly pessimistic number due to a sampling bug. This is the assumption-validation discipline working correctly: investigate before accepting or dismissing alarms.
+
+**What this taught**
+
+When designing future agent prompts for measurement work, specify data scope explicitly. Leaving "scan the archive" open to interpretation led to a plausibly defensible-looking sampling choice that produced statistically wrong output. Future prompts should say "scan the full archive, no sampling" or "sample with documented methodology" rather than leaving scope implicit.
+
+## Entry 13 — Depth-dependent trade investigation [ANALYSIS, 2026-05-16]
+
+**Context**
+
+Entry 12's assumption suite reported `depth_dependency_rate=0.1032`: about 10% of trades require book depth beyond level 1, which v0 simulator does not model. Goal of this investigation: identify which markets, categories, and order sizes drive depth dependence, so v1 priorities are empirically grounded.
+
+**Investigation scope**
+
+Implemented as Section 6 of `notebooks/2026-05-22-first-look.ipynb`. Four queries: market-level depth-dependence rates, distribution histogram, trade-size bucket analysis, and category aggregation. Kalshi is not analyzed because Kalshi trade capture is deferred to Phase 1.5.
+
+**Headline finding**
+
+`63,293` fresh Polymarket trades analyzed, each within `60s` of a snapshot. `6,340` are depth-dependent, confirming the `10.02%` overall rate.
+
+**Distribution shape: concentrated, not long-tail**
+
+The `234` active markets do not contribute uniformly. Top 5 markets show depth rates of `50-60%`; markets 6-12 show `30-50%`; remaining about 220 markets average below `30%`. This concentration means depth walking is most critical for a specific subset of markets rather than across the entire universe.
+
+**Mechanism distinguishes thin-book from variance-driven**
+
+The top depth-dependent markets fall into two categories:
+
+1. **Thin-book markets:** `avg_trade_size` routinely exceeds `avg_level_1_size`. Example: a market with `avg_trade_size=276` and `avg_level_1_size=170`. Trades structurally consume depth.
+2. **Variance-driven markets:** `avg_trade_size` is below `avg_level_1_size`, but specific large trades still need depth. Most trades fill at top; outliers do not.
+
+These distinctions matter for v1 priorities: thin-book markets need depth walking always; variance-driven markets need it only for outlier orders.
+
+**Trade-size threshold**
+
+Size-bucket analysis over `63,293` Polymarket trades:
+
+- Less than `10` contracts: `1.14%` depth-dependent.
+- `10-100`: `7.66%`.
+- `100-1000`: `19.27%`.
+- `1000-10000`: `26.34%`.
+- More than `10000`: `25.11%`.
+
+The relationship is monotonic and plateaus around `25%` for large trades. The plateau suggests depth walking deeper than level 2-3 is uncommon, which constrains v1 implementation scope.
+
+**Categorization limitation**
+
+Section 6.4 attempted to group depth-dependent trades by market category. Polymarket markets all classified as `polymarket_unknown` because the implementation parsed category prefixes from `market_id` strings, which works for Kalshi tickers like `KXBTCD` and `KXMLBHR`, but not for Polymarket hex hash IDs without embedded category info. Real categorization for Polymarket requires joining with `market_metadata_snapshots` and extracting event/category fields. Documented as follow-up work.
+
+**Implication for current trading scope**
+
+With `PM_EDGE_MAX_ORDER_NOTIONAL_USD=100`, typical order sizes are `150-300` contracts, landing in the `100-1000` bucket where depth walking matters `19%` of the time. However, the concentration analysis suggests a market filter could substantially close this gap without v1 depth walking: excluding markets where `avg_trade_size > avg_level_1_size * 0.5` would remove most thin-book markets while preserving the about 220 deeper-book markets where v0 simulator is reliable.
+
+**v1 priorities updated**
+
+1. **Market-filter logic first**: about 1 day of work. Filter universe at strategy boundary based on book-depth characteristics. Allows v0 simulator to remain reliable for the filtered universe.
+2. **Polymarket category metadata join**: about half a day. Enables real category-level analysis. Useful generally, not specific to depth investigation.
+3. **Depth-walking simulator logic**: v1 proper, about 2-3 days. Deferred until market-filter approach proves insufficient. Algorithm is straightforward; validation against trade-level data is the hard part.
+
+**Methodological note**
+
+The investigation explicitly produced a finding that defers v1 work rather than expanding it. This is by design: the conservative-by-default principle applied to v1 sequencing means doing the cheapest thing that addresses the problem before reaching for more sophisticated infrastructure. Depth walking may genuinely be required later; right now there is a simpler approach to evaluate first.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
