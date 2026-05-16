@@ -115,7 +115,7 @@ Polymarket Gamma/CLOB + Kalshi REST
 
 - `setup_vps.sh`: provisions a fresh Ubuntu 24.04 droplet, creates the `pmedge` user, installs system dependencies and `uv`, clones the repo, creates the virtual environment, installs the package, copies `.env.example`, installs the systemd unit, and starts the service.
 - `systemd/forward-indexer.service`: runs `scripts.forward_index` as the non-root `pmedge` user and restarts on failure.
-- `rsync_to_laptop.sh`: pulls completed parquet parts from the VPS into local `data/raw/forward_index/` without recopying existing files.
+- `rsync_to_laptop.sh`: pulls completed parquet parts from the VPS into `$PM_EDGE_LOCAL_FORWARD_INDEX_DIR`, falling back to local `data/raw/forward_index/`, using rsync size/mtime checks and `--partial`.
 
 The setup script currently requires `PM_EDGE_GIT_REMOTE` to be set to the real repository URL. Its default contains a `YOURUSERNAME` placeholder.
 

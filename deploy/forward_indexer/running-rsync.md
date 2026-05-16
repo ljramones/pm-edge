@@ -1,120 +1,77 @@
-**What the script does**
+# Running Rsync
 
-- Uses three env vars with sensible defaults
-- Creates the local directory if missing
-- Uses `rsync -avz --partial --ignore-existing`
-  - `-a` = archive mode (preserves timestamps, permissions, recursion)
-  - `-v` = verbose
-  - `-z` = compress in transit
-  - `--partial` = keep partially-transferred files if rsync is interrupted, resume from there next time
-  - `--ignore-existing` = skip files that already exist on the destination
+This note documents the current laptop sync workflow for pulling forward-indexer parquet from the VPS into the local analysis archive.
 
-**The one flag worth thinking about: `--ignore-existing`**
+## Current Script Behavior
 
-This skips any file that already exists at the destination, regardless of whether the VPS version has changed. For a write-once-then-immutable parquet pattern (which is how most streaming indexers work — flush batch to a new file, never modify it), this is fine and efficient.
-
-But it has one failure mode: if rsync runs while the indexer is mid-flush on a parquet file, you transfer the partial file. Next time rsync runs, `--ignore-existing` skips it because it already exists locally, even though the VPS version is now complete. You end up with a permanently truncated file locally.
-
-Two options:
-
-1. **Drop `--ignore-existing`.** rsync's default with `-a` uses size and mtime to detect changes — it won't re-transfer unchanged files, so you keep the efficiency, but you also pick up any files that changed size since last sync. This is the safer default for archive workflows.
-
-2. **Keep `--ignore-existing` and add a periodic full-sync.** Once a week or so, drop the flag for one run to catch any partial files that got stuck. More complex, not really worth the cognitive overhead.
-
-I'd recommend option 1. Edit the script:
+`deploy/forward_indexer/rsync_to_laptop.sh` uses:
 
 ```bash
-rsync -avz --partial \
+rsync -avz --partial -e "ssh -i ~/.ssh/pm_edge_rsync" \
   "${VPS_HOST}:${REMOTE_DIR}" \
   "${LOCAL_DIR}"
 ```
 
-Or override at runtime with an env var passthrough, but a script edit is cleaner. Commit it back to the repo.
+The script does not use `--ignore-existing`. Rsync's normal archive-mode size and mtime checks avoid recopying unchanged parquet parts while still repairing interrupted or partial local files on a later run.
 
-**Configure your env**
+The script reads these environment variables:
 
-The script requires `PM_EDGE_VPS_HOST` and you'll want to set `PM_EDGE_LOCAL_FORWARD_INDEX_DIR` to an absolute path (otherwise it lands wherever you run the script from, which is a footgun).
+- `PM_EDGE_VPS_HOST`: required, for example `pmedge@<droplet-ip>`.
+- `PM_EDGE_REMOTE_FORWARD_INDEX_DIR`: optional, defaults to `/opt/pm-edge/data/raw/forward_index/`.
+- `PM_EDGE_LOCAL_FORWARD_INDEX_DIR`: optional, defaults to `data/raw/forward_index/` relative to the current working directory.
 
-Add to your `~/.zshrc`:
+For the laptop workflow, set an absolute local destination:
 
 ```bash
 export PM_EDGE_VPS_HOST="pmedge@<your-vps-ip>"
-export PM_EDGE_LOCAL_FORWARD_INDEX_DIR="$HOME/pm-edge-data"
+export PM_EDGE_LOCAL_FORWARD_INDEX_DIR="$HOME/pm-edge-data/forward_index"
 ```
 
-Then `source ~/.zshrc` (or open a new terminal).
+## First Run
 
-**First run — dry run, then real**
-
-Always do a dry run first to confirm what's about to happen:
+Run a dry run first:
 
 ```bash
-# Dry run: shows what would be transferred without doing it
-rsync -avzn --partial \
-  "${PM_EDGE_VPS_HOST}:/opt/pm-edge/data/raw/forward_index/" \
-  "${PM_EDGE_LOCAL_FORWARD_INDEX_DIR}/"
+rsync -avzn --partial -e "ssh -i ~/.ssh/pm_edge_rsync" \
+  "${PM_EDGE_VPS_HOST}:${PM_EDGE_REMOTE_FORWARD_INDEX_DIR:-/opt/pm-edge/data/raw/forward_index/}" \
+  "${PM_EDGE_LOCAL_FORWARD_INDEX_DIR:-data/raw/forward_index/}"
 ```
 
-The `-n` flag makes it a no-op simulation. You'll see a list of files that would transfer plus total size. For the first run this is your entire ~269 MB.
-
-If that looks right, run for real:
+Then run the script:
 
 ```bash
-bash ~/pm-edge/deploy/forward_indexer/rsync_to_laptop.sh
+bash deploy/forward_indexer/rsync_to_laptop.sh
 ```
 
-**Verify**
+## Verify
 
 ```bash
 du -sh "$PM_EDGE_LOCAL_FORWARD_INDEX_DIR"
 ls "$PM_EDGE_LOCAL_FORWARD_INDEX_DIR"
 ```
 
-You should see `order_book_snapshots/`, `trade_events/`, `market_metadata_snapshots/` directories, with sizes roughly matching what's on the VPS.
+Expected table directories:
 
-Then a DuckDB sanity check against the local copy:
+```text
+order_book_snapshots/
+trade_events/
+market_metadata_snapshots/
+```
+
+DuckDB sanity check:
 
 ```bash
 duckdb -c "SELECT venue, COUNT(*) FROM read_parquet('$PM_EDGE_LOCAL_FORWARD_INDEX_DIR/order_book_snapshots/**/*.parquet') GROUP BY venue"
 ```
 
-Should return Polymarket ~1.5M, Kalshi ~10k. Same numbers as the VPS query.
+## Cron
 
-**Cron for daily**
+macOS cron does not inherit the interactive shell environment. Put the required environment values directly in the crontab entry or wrap them in a local shell script.
 
-Once the manual run works, add to your laptop's crontab:
+Example daily pull:
 
-```bash
-crontab -e
+```cron
+0 9 * * * PM_EDGE_VPS_HOST="pmedge@<ip>" PM_EDGE_LOCAL_FORWARD_INDEX_DIR="$HOME/pm-edge-data/forward_index" /bin/bash /Users/larrymitchell/ML/pm-edge/deploy/forward_indexer/rsync_to_laptop.sh >> "$HOME/pm-edge-data/rsync.log" 2>&1
 ```
 
-Add:
-
-```
-0 9 * * * /bin/bash /Users/larry/pm-edge/deploy/forward_indexer/rsync_to_laptop.sh >> /Users/larry/pm-edge-data/rsync.log 2>&1
-```
-
-That's 9 AM daily, when your laptop is reliably awake. You can pick any time you prefer.
-
-Note: cron jobs on macOS need full paths for binaries and don't inherit your shell env. The env vars `PM_EDGE_VPS_HOST` and `PM_EDGE_LOCAL_FORWARD_INDEX_DIR` need to be available to the cron'd process. Two ways:
-
-1. Set them inside the script itself (less flexible)
-2. Set them in the crontab entry:
-
-```
-0 9 * * * export PM_EDGE_VPS_HOST="pmedge@<ip>" PM_EDGE_LOCAL_FORWARD_INDEX_DIR="/Users/larry/pm-edge-data" && /bin/bash /Users/larry/pm-edge/deploy/forward_indexer/rsync_to_laptop.sh >> /Users/larry/pm-edge-data/rsync.log 2>&1
-```
-
-Less elegant but explicit and works.
-
-**Summary of what to do right now**
-
-1. Edit the script to drop `--ignore-existing`
-2. Commit the change
-3. Set env vars in `~/.zshrc`
-4. Dry-run from the laptop
-5. Real run
-6. Verify with DuckDB
-7. Add the cron entry
-
-About 15 minutes total. Then you have a working pipeline that accumulates clean data on your laptop daily until the external drive arrives May 20.
+Use the real checkout path on the laptop if it differs from `/Users/larrymitchell/ML/pm-edge`.

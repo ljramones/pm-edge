@@ -120,7 +120,7 @@ sudo systemctl restart forward-indexer.service
 journalctl -u forward-indexer.service -f
 ```
 
-The service runs as non-root user `pmedge` and writes to `/opt/pm-edge/data/raw/forward_index`.
+The service runs as non-root user `pmedge` and writes to `/opt/pm-edge/data/raw/forward_index`. The default memory ceiling is 1024 MB; production deployments can override it with `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB` in `.env`.
 
 `PM_EDGE_GIT_REMOTE` is required in practice. The script default contains a placeholder repository URL.
 

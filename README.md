@@ -18,11 +18,9 @@ For the data-quality record explaining why the legacy signals dataset was reject
 
 For the latest enhanced-feature validation, see [Feature Engineering Impact Report](docs/FEATURE_ENGINEERING_IMPACT_REPORT.md).
 
-Current committed milestone line:
+Current operational milestone:
 
-- `3531cef` - bootstrap project foundation
-- `2f698a3` - finish Phase 0 foundation
-- `0931c27` - update README for Phase 0
+- Phase 1 forward indexer deployed: Polymarket WebSocket-sourced book capture, Kalshi REST-refreshed book capture, static ops status page, laptop rsync workflow, and DuckDB notebook analysis against forward parquet data.
 
 ---
 

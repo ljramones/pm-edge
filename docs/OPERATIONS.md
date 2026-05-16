@@ -232,7 +232,7 @@ notebooks/lib/queries.py
 notebooks/lib/plots.py
 ```
 
-The helpers create DuckDB views over the local archive and return Pandas DataFrames. They handle a missing or empty archive by returning empty DataFrames where practical, so notebooks can open before the first successful rsync.
+The helpers create DuckDB views over the local archive and return Pandas DataFrames. `get_connection()` fails fast when the configured archive path is missing or contains no parquet files in the expected table directories. Missing individual tables still get empty schema-compatible views with warnings, which supports partially populated archives such as a capture with snapshots but no trades yet.
 
 ## Notebook Operating Rules
 
