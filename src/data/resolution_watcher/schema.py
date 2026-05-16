@@ -22,6 +22,11 @@ class MarketResolutionCandidate:
     end_date: datetime | None
     status: str | None
     raw_json: str | None = None
+    venue_status_raw: str | None = None
+    is_closed: bool | None = None
+    is_resolved: bool | None = None
+    resolution_outcome: str | None = None
+    resolution_timestamp_utc: datetime | None = None
 
     @property
     def metadata_snapshot_id(self) -> str:

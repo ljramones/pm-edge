@@ -79,6 +79,29 @@ def metadata_schema() -> pa.Schema:
             ("volume_24h", pa.float64()),
             ("liquidity", pa.float64()),
             ("end_date", pa.timestamp("us", tz="UTC")),
+            ("venue_status_raw", pa.string()),
+            ("is_closed", pa.bool_()),
+            ("is_archived", pa.bool_()),
+            ("is_resolved", pa.bool_()),
+            ("resolution_outcome", pa.string()),
+            ("resolution_timestamp_utc", pa.timestamp("us", tz="UTC")),
+            ("accepting_orders", pa.bool_()),
+            ("raw_json", pa.string()),
+        ]
+    )
+
+
+def old_metadata_schema() -> pa.Schema:
+    return pa.schema(
+        [
+            ("schema_version", pa.int16()),
+            ("venue", pa.string()),
+            ("market_id", pa.string()),
+            ("captured_at_utc", pa.timestamp("us", tz="UTC")),
+            ("status", pa.string()),
+            ("volume_24h", pa.float64()),
+            ("liquidity", pa.float64()),
+            ("end_date", pa.timestamp("us", tz="UTC")),
             ("raw_json", pa.string()),
         ]
     )
@@ -106,6 +129,37 @@ def snapshot_schema() -> pa.Schema:
 
 
 def metadata_row(
+    venue: str,
+    market_id: str,
+    captured_at: datetime,
+    end_date: datetime,
+    status: str,
+    raw_json: dict[str, Any],
+    is_resolved: bool = True,
+    is_closed: bool = True,
+    resolution_outcome: str | None = "YES",
+) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "venue": venue,
+        "market_id": market_id,
+        "captured_at_utc": captured_at,
+        "status": status,
+        "volume_24h": 1_000.0,
+        "liquidity": 100.0,
+        "end_date": end_date,
+        "venue_status_raw": status,
+        "is_closed": is_closed,
+        "is_archived": False,
+        "is_resolved": is_resolved,
+        "resolution_outcome": resolution_outcome,
+        "resolution_timestamp_utc": captured_at,
+        "accepting_orders": False,
+        "raw_json": json.dumps(raw_json),
+    }
+
+
+def old_metadata_row(
     venue: str,
     market_id: str,
     captured_at: datetime,

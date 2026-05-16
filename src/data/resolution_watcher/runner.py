@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import signal
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -62,6 +63,9 @@ class ResolutionWatcherRunner:
         self.total_resolved_since_start = 0
         self.markets_checked_since_heartbeat = 0
         self.resolved_since_heartbeat = 0
+        self.metadata_candidates_since_heartbeat = 0
+        self.new_resolutions_since_heartbeat = 0
+        self.api_fallbacks_since_heartbeat = 0
         self._logger = get_logger(__name__)
         self._stop = asyncio.Event()
 
@@ -88,14 +92,19 @@ class ResolutionWatcherRunner:
                 self._logger.warning("resolution_watcher_venue_disabled", venue=venue)
                 continue
             try:
-                candidates = detect_resolution_candidates(
+                detection = detect_resolution_candidates(
                     self.settings.source_dir,
                     venue=venue,
                     seen=self.seen_resolutions,
                     now=detected_at,
+                    lookback_days=self.settings.metadata_lookback_days,
                 )
+                candidates = detection.candidates
+                self.metadata_candidates_since_heartbeat += detection.metadata_candidates_seen
+                self.new_resolutions_since_heartbeat += len(candidates)
                 self.markets_checked_since_heartbeat += len(candidates)
                 written: list[ResolvedMarketOutcome] = []
+                api_fallbacks_used = 0
                 for candidate in candidates:
                     final_snapshot = find_final_book_snapshot(
                         self.settings.source_dir,
@@ -105,11 +114,19 @@ class ResolutionWatcherRunner:
                     )
                     if self.settings.dry_run:
                         continue
-                    outcome = await client.fetch_resolution_outcome(
+                    outcome = _outcome_from_metadata(
                         candidate,
                         detected_at=detected_at,
                         final_snapshot=final_snapshot,
                     )
+                    if outcome is None:
+                        api_fallbacks_used += 1
+                        self.api_fallbacks_since_heartbeat += 1
+                        outcome = await client.fetch_resolution_outcome(
+                            candidate,
+                            detected_at=detected_at,
+                            final_snapshot=final_snapshot,
+                        )
                     if outcome is None:
                         continue
                     written.append(outcome)
@@ -122,6 +139,9 @@ class ResolutionWatcherRunner:
                     "resolution_watcher_cycle",
                     venue=venue,
                     markets_checked=len(candidates),
+                    metadata_candidates_seen=detection.metadata_candidates_seen,
+                    new_resolutions_detected=len(candidates),
+                    api_fallbacks_used=api_fallbacks_used,
                     markets_resolved_this_cycle=len(written),
                     total_resolved_since_start=self.total_resolved_since_start,
                     dry_run=self.settings.dry_run,
@@ -133,11 +153,17 @@ class ResolutionWatcherRunner:
         self._logger.info(
             "resolution_watcher_heartbeat",
             markets_checked=self.markets_checked_since_heartbeat,
+            metadata_candidates_seen=self.metadata_candidates_since_heartbeat,
+            new_resolutions_detected=self.new_resolutions_since_heartbeat,
+            api_fallbacks_used=self.api_fallbacks_since_heartbeat,
             markets_resolved_this_cycle=self.resolved_since_heartbeat,
             total_resolved_since_start=self.total_resolved_since_start,
         )
         self.markets_checked_since_heartbeat = 0
         self.resolved_since_heartbeat = 0
+        self.metadata_candidates_since_heartbeat = 0
+        self.new_resolutions_since_heartbeat = 0
+        self.api_fallbacks_since_heartbeat = 0
 
     async def _sleep_or_stop(self, seconds: float) -> bool:
         try:
@@ -153,19 +179,36 @@ class ResolutionWatcherRunner:
                 loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
 
 
+@dataclass(frozen=True)
+class ResolutionDetectionResult:
+    metadata_candidates_seen: int
+    candidates: list[MarketResolutionCandidate]
+
+
 def detect_resolution_candidates(
     source_dir: Path,
     *,
     venue: str,
     seen: set[tuple[str, str]],
     now: datetime,
-) -> list[MarketResolutionCandidate]:
+    lookback_days: int = 7,
+) -> ResolutionDetectionResult:
     metadata_dir = source_dir / "market_metadata_snapshots"
     if not metadata_dir.exists() or not any(metadata_dir.rglob("*.parquet")):
-        return []
+        return ResolutionDetectionResult(metadata_candidates_seen=0, candidates=[])
     con = duckdb.connect()
     try:
         path = _sql_string(str(metadata_dir / "**" / "*.parquet"))
+        columns = _metadata_columns(con, path)
+        required_columns = {
+            "is_resolved",
+            "is_closed",
+            "resolution_outcome",
+            "resolution_timestamp_utc",
+        }
+        if not required_columns.issubset(columns):
+            return ResolutionDetectionResult(metadata_candidates_seen=0, candidates=[])
+        lower_bound = _to_utc(now).timestamp() - lookback_days * 86_400
         rows = con.execute(
             f"""
             WITH latest AS (
@@ -176,32 +219,43 @@ def detect_resolution_candidates(
                     end_date::VARCHAR AS end_date_text,
                     status,
                     raw_json,
+                    venue_status_raw,
+                    is_closed,
+                    is_resolved,
+                    resolution_outcome,
+                    resolution_timestamp_utc::VARCHAR AS resolution_timestamp_text,
                     row_number() OVER (
                         PARTITION BY venue, market_id
                         ORDER BY captured_at_utc DESC
                     ) AS rn
-                FROM read_parquet({path})
+                FROM read_parquet({path}, union_by_name = true)
                 WHERE venue = ?
+                  AND captured_at_utc >= to_timestamp(?)
             )
-            SELECT venue, market_id, captured_at_text, end_date_text, status, raw_json
+            SELECT
+                venue,
+                market_id,
+                captured_at_text,
+                end_date_text,
+                status,
+                raw_json,
+                venue_status_raw,
+                is_closed,
+                is_resolved,
+                resolution_outcome,
+                resolution_timestamp_text
             FROM latest
             WHERE rn = 1
               AND (
-                end_date_text IS NULL
-                OR CAST(end_date_text AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ)
-              )
-              AND (
-                lower(coalesce(status, '')) IN ('closed', 'settled', 'resolved')
-                OR lower(coalesce(json_extract_string(raw_json, '$.closed'), '')) = 'true'
-                OR lower(coalesce(json_extract_string(raw_json, '$.status'), '')) IN (
-                    'closed', 'settled', 'resolved'
-                )
+                is_resolved = true
+                OR (is_closed = true AND resolution_outcome IS NOT NULL)
               )
             """,
-            [venue, _to_utc(now).isoformat()],
+            [venue, lower_bound],
         ).fetchall()
     finally:
         con.close()
+    metadata_candidates_seen = len(rows)
     candidates = [
         MarketResolutionCandidate(
             venue=str(row[0]),
@@ -210,11 +264,64 @@ def detect_resolution_candidates(
             end_date=None if row[3] is None else _parse_datetime(row[3]),
             status=None if row[4] is None else str(row[4]),
             raw_json=None if row[5] is None else str(row[5]),
+            venue_status_raw=None if row[6] is None else str(row[6]),
+            is_closed=None if row[7] is None else bool(row[7]),
+            is_resolved=None if row[8] is None else bool(row[8]),
+            resolution_outcome=None if row[9] is None else str(row[9]),
+            resolution_timestamp_utc=None if row[10] is None else _parse_datetime(row[10]),
         )
         for row in rows
         if (str(row[0]), str(row[1])) not in seen
     ]
-    return candidates
+    return ResolutionDetectionResult(
+        metadata_candidates_seen=metadata_candidates_seen,
+        candidates=candidates,
+    )
+
+
+def _outcome_from_metadata(
+    candidate: MarketResolutionCandidate,
+    *,
+    detected_at: datetime,
+    final_snapshot: FinalBookSnapshot,
+) -> ResolvedMarketOutcome | None:
+    resolved_value = _resolved_value(candidate.resolution_outcome)
+    if resolved_value is None:
+        return None
+    return ResolvedMarketOutcome(
+        venue=candidate.venue,
+        market_id=candidate.market_id,
+        resolution_timestamp_utc=detected_at,
+        venue_resolved_at_utc=candidate.resolution_timestamp_utc,
+        resolved_value=resolved_value,
+        resolution_source="metadata_status",
+        final_top_bid=final_snapshot.top_bid,
+        final_top_ask=final_snapshot.top_ask,
+        final_spread=final_snapshot.spread,
+        final_snapshot_timestamp_utc=final_snapshot.timestamp_utc,
+        metadata_snapshot_id=candidate.metadata_snapshot_id,
+    )
+
+
+def _resolved_value(outcome: str | None) -> float | None:
+    if outcome is None:
+        return None
+    text = outcome.strip().lower()
+    if text in {"yes", "y", "true", "1", "1.0"}:
+        return 1.0
+    if text in {"no", "n", "false", "0", "0.0"}:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _metadata_columns(con: duckdb.DuckDBPyConnection, path: str) -> set[str]:
+    rows = con.execute(
+        f"DESCRIBE SELECT * FROM read_parquet({path}, union_by_name = true)"
+    ).fetchall()
+    return {str(row[0]) for row in rows}
 
 
 def find_final_book_snapshot(

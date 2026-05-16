@@ -27,4 +27,5 @@ class ResolutionWatcherSettings(BaseSettings):
     http_timeout_seconds: int = Field(default=20, ge=1)
     retry_attempts: int = Field(default=3, ge=1)
     heartbeat_interval_seconds: int = Field(default=60, ge=1)
+    metadata_lookback_days: int = Field(default=7, ge=1)
     dry_run: bool = False
