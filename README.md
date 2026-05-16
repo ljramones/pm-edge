@@ -147,6 +147,53 @@ Current operational milestone:
 - [x] Monte Carlo ruin simulation saved with every portfolio deep backtest
 - [x] Hybrid deep-backtest mode with directional plus liquidity-harvest outputs
 
+### Phase 9 - Signal Pipeline Stabilization
+
+- [x] Historical signal generation made stricter about empty outputs and unresolved market data
+- [x] Resolved-market and outcome paths normalized around `data/`
+- [x] CLI failure modes improved for missing resolved-market parquet and empty backtest inputs
+- [x] Legacy signal data quality issues documented as blockers for strategy approval
+
+### Phase 10 - Historical Price Safeguards
+
+- [x] Historical price fallback behavior made explicit with lookahead flags
+- [x] Backtest inputs guarded against resolved-price contamination
+- [x] Signal-generation and deep-backtest flows updated to reject or filter lookahead-tainted rows
+- [x] Data-quality lesson recorded: candle-derived historical prices cannot validate liquidity-harvest execution
+
+### Phase 11 - Local LLM and Real Model Training
+
+- [x] Ollama integrated as the default LLM backend for local news summarization and feature generation
+- [x] Default local model set to `qwen2.5:32b`, with configurable high-value fallback model
+- [x] `--ollama-model` override added for signal generation
+- [x] Walk-forward LightGBM training path added through `scripts/train_model.py` and `--train-model`
+- [x] Trained model artifacts and feature-importance outputs saved under `models/`
+
+### Phase 12 - Relaxed Diagnostic Backtesting
+
+- [x] `--relaxed` mode added to `scripts/deep_backtest.py`
+- [x] Individual risk override flags added for edge threshold, max exposure, Kelly fraction, and liquidity cap behavior
+- [x] Reports clearly mark relaxed runs as diagnostic and not representative of strict risk rules
+- [x] Relaxed mode used to inspect raw signal strength separately from production-style risk constraints
+
+### Phase 13 - Liquidity-Only Strategy Focus
+
+- [x] `--mode liquidity-only` added to deep backtest and live paper flows
+- [x] Directional betting disabled in liquidity-only mode
+- [x] Liquidity harvester hardened with adverse-selection scoring, stricter post-cost edge gates, conservative tail exposure, and reason-code diagnostics
+- [x] Liquidity performance reports added with PnL attribution and Go / Promising / No-Go verdicts
+- [x] Larger backfill validation showed liquidity-only was narrow and directional hybrid remained No-Go
+
+### Phase 14 - Enhanced Feature Engineering
+
+- [x] Enhanced on-chain features for whale flow, funding momentum, open-interest pressure, and flow imbalance proxies
+- [x] Fear and temperature layer expanded with bounded regime and interaction features
+- [x] Micro-round features added for duration, spread dynamics, maker advantage, and incentive-style diagnostics
+- [x] `--feature-set enhanced` added to signal generation
+- [x] Feature engineering impact report recorded that improved features did not rescue the legacy signal dataset
+
+The Phase 9-14 work is retained because it documents what was tried and why the project changed direction. It does not override the current validation stance: legacy `signals_*.parquet` backtests are research artifacts, and real strategy validation now depends on forward-captured book data plus an execution simulator.
+
 ---
 
 ## Project Structure
@@ -238,6 +285,39 @@ Important Phase 8 modules:
 - `src/strategies/structural_scanner.py` - simple sum-less-than-one / sum-greater-than-one consistency scanner
 - `src/execution/risk_engine.py` - Monte Carlo ruin simulator and hardened risk settings
 - `src/execution/portfolio.py` - quarter-Kelly, cash-buffer, cluster, liquidity, and impact-aware allocation controls
+
+Important Phase 9-10 modules and artifacts:
+
+- `scripts/generate_signals.py` - stricter output validation, historical price safeguards, and lookahead flag propagation
+- `scripts/deep_backtest.py` - filtering and reporting paths that reject lookahead-tainted signal rows
+- `docs/DATA_QUALITY_LESSONS.md` - durable record of why the pre-forward-indexer signal dataset was rejected
+
+Important Phase 11 modules:
+
+- `src/data/llm_news_processor.py` - local Ollama provider support and fallback handling
+- `scripts/generate_signals.py` - `--ollama`, `--ollama-model`, and `--train-model` integration
+- `src/models/trainer.py` - walk-forward LightGBM training, calibration, model persistence, and feature importance
+- `scripts/train_model.py` - standalone training CLI for signal parquet files
+
+Important Phase 12 modules:
+
+- `scripts/deep_backtest.py` - relaxed diagnostic profile, risk override flags, and relaxed-mode report metadata
+- `scripts/generate_report.py` - visible relaxed-mode warning in generated reports
+
+Important Phase 13 modules:
+
+- `src/strategies/liquidity_provider.py` - hardened liquidity harvester, adverse-selection blocking, tail-No filters, and PnL attribution
+- `scripts/deep_backtest.py` - `liquidity-only` mode and dedicated liquidity harvester report generation
+- `scripts/live_paper.py` - liquidity-only paper mode
+- `src/execution/paper_trader.py` - paper-trading risk flags aligned with liquidity-only mode
+
+Important Phase 14 modules and artifacts:
+
+- `src/features/onchain_enhanced.py` - deterministic on-chain and market-flow feature proxies
+- `src/features/fear_layer.py` - enhanced fear, temperature, regime, and interaction outputs
+- `src/features/micro_round.py` - micro-round duration, spread, and maker-advantage features
+- `src/features/feature_store.py` - enhanced feature-set integration
+- `docs/FEATURE_ENGINEERING_IMPACT_REPORT.md` - documented ablation, feature importance, and updated verdict
 
 ---
 
