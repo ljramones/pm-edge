@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -13,6 +14,7 @@ import pandas as pd
 
 DEFAULT_DATA_DIR = Path("~/pm-edge-data/forward_index").expanduser()
 DATA_DIR_ENV = "PM_EDGE_LOCAL_FORWARD_INDEX_DIR"
+EXPECTED_TABLES = ("order_book_snapshots", "trade_events", "market_metadata_snapshots")
 
 TIMESCALE_RE = re.compile(r"^\d+\s+(minute|hour|day)s?$")
 
@@ -24,7 +26,8 @@ def get_connection(data_dir: Path | None = None) -> duckdb.DuckDBPyConnection:
     or ~/pm-edge-data/forward_index if not set.
     """
 
-    root = data_dir or Path(os.environ.get(DATA_DIR_ENV, DEFAULT_DATA_DIR)).expanduser()
+    root, source = _resolve_data_dir(data_dir)
+    _validate_data_dir(root, source)
     con = duckdb.connect()
     _create_forward_index_views(con, root)
     return con
@@ -331,7 +334,38 @@ def _create_view(
         glob = _sql_string(str(table_dir / "**" / "*.parquet"))
         con.execute(f"CREATE OR REPLACE TEMP VIEW {table} AS SELECT * FROM read_parquet({glob})")
         return
+    warnings.warn(
+        f"No parquet files for {table} at {table_dir}; using empty view with target schema.",
+        stacklevel=2,
+    )
     con.execute(f"CREATE OR REPLACE TEMP VIEW {table} AS {empty_sql}")
+
+
+def _resolve_data_dir(data_dir: Path | None) -> tuple[Path, str]:
+    if data_dir is not None:
+        return data_dir.expanduser(), "explicit arg"
+    env_value = os.environ.get(DATA_DIR_ENV)
+    if env_value:
+        return Path(env_value).expanduser(), f"env var {DATA_DIR_ENV}"
+    return DEFAULT_DATA_DIR, "default"
+
+
+def _validate_data_dir(data_dir: Path, source: str) -> None:
+    expected = ", ".join(EXPECTED_TABLES)
+    hint = f"set {DATA_DIR_ENV} or pass data_dir= explicitly"
+    if not data_dir.is_dir():
+        raise FileNotFoundError(
+            f"Forward-index data_dir={data_dir} resolved from {source} does not exist "
+            f"or is not a directory; {hint}. Expected subdirectories: {expected}."
+        )
+    if not any(
+        (data_dir / table).exists() and any((data_dir / table).rglob("*.parquet"))
+        for table in EXPECTED_TABLES
+    ):
+        raise FileNotFoundError(
+            f"No parquet files found under data_dir={data_dir} resolved from {source}; "
+            f"{hint}. Expected subdirectories: {expected}."
+        )
 
 
 def _time_filters(

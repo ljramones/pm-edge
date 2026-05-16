@@ -6,8 +6,28 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from notebooks.lib import queries
+
+
+def test_get_connection_raises_when_data_dir_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+
+    with pytest.raises(FileNotFoundError, match="Expected subdirectories") as exc:
+        queries.get_connection(missing)
+
+    assert str(missing) in str(exc.value)
+
+
+def test_get_connection_raises_when_data_dir_has_no_parquet(tmp_path: Path) -> None:
+    for table in queries.EXPECTED_TABLES:
+        (tmp_path / table).mkdir()
+
+    with pytest.raises(FileNotFoundError, match="No parquet files found") as exc:
+        queries.get_connection(tmp_path)
+
+    assert "order_book_snapshots" in str(exc.value)
 
 
 def test_get_connection_uses_env_data_dir(monkeypatch: Any, tmp_path: Path) -> None:
@@ -19,6 +39,29 @@ def test_get_connection_uses_env_data_dir(monkeypatch: Any, tmp_path: Path) -> N
 
     assert result is not None
     assert result[0] == 5
+
+
+def test_get_connection_explicit_arg_wins_over_env(monkeypatch: Any, tmp_path: Path) -> None:
+    env_dir = write_snapshot_only_fixture(tmp_path / "env")
+    explicit_dir = write_forward_index_fixture(tmp_path / "explicit")
+    monkeypatch.setenv(queries.DATA_DIR_ENV, str(env_dir))
+
+    con = queries.get_connection(explicit_dir)
+    result = con.execute("SELECT count(*) FROM order_book_snapshots").fetchone()
+
+    assert result is not None
+    assert result[0] == 5
+
+
+def test_get_connection_warns_for_missing_specific_table(tmp_path: Path) -> None:
+    data_dir = write_snapshot_only_fixture(tmp_path)
+
+    with pytest.warns(UserWarning) as warnings:
+        con = queries.get_connection(data_dir)
+
+    assert any("No parquet files for trade_events" in str(warning.message) for warning in warnings)
+    assert con.execute("SELECT count(*) FROM order_book_snapshots").fetchone() == (1,)
+    assert con.execute("SELECT count(*) FROM trade_events").fetchone() == (0,)
 
 
 def test_hourly_snapshot_volume(tmp_path: Path) -> None:
@@ -108,14 +151,6 @@ def test_resolved_market_outcomes_stub(tmp_path: Path) -> None:
     ]
 
 
-def test_missing_archive_returns_empty_dataframes(tmp_path: Path) -> None:
-    con = queries.get_connection(tmp_path / "missing")
-
-    assert queries.hourly_snapshot_volume(con).empty
-    assert queries.source_breakdown(con).empty
-    assert int(queries.book_state_quality(con, venue="polymarket").iloc[0]["snapshots"]) == 0
-
-
 def write_forward_index_fixture(tmp_path: Path) -> Path:
     data_dir = tmp_path / "forward_index"
     base = datetime(2026, 5, 15, 0, 5, tzinfo=UTC)
@@ -150,6 +185,28 @@ def write_forward_index_fixture(tmp_path: Path) -> Path:
         data_dir / "trade_events" / "venue=kalshi" / "date=2026-05-15" / "part.parquet",
         [row for row in trades if row["venue"] == "kalshi"],
         trade_event_schema(),
+    )
+    write_table(
+        data_dir
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / "date=2026-05-15"
+        / "part.parquet",
+        [metadata_row("polymarket", "poly-1", base)],
+        market_metadata_snapshot_schema(),
+    )
+    return data_dir
+
+
+def write_snapshot_only_fixture(tmp_path: Path) -> Path:
+    data_dir = tmp_path / "forward_index"
+    row = snapshot_row(
+        "polymarket", "poly-1", datetime(2026, 5, 15, tzinfo=UTC), 0.49, 0.51, "rest"
+    )
+    write_table(
+        data_dir / "order_book_snapshots" / "venue=polymarket" / "date=2026-05-15" / "part.parquet",
+        [row],
+        order_book_snapshot_schema(),
     )
     return data_dir
 
@@ -195,6 +252,22 @@ def trade_event_schema() -> pa.Schema:
     )
 
 
+def market_metadata_snapshot_schema() -> pa.Schema:
+    return pa.schema(
+        [
+            ("schema_version", pa.int16()),
+            ("venue", pa.string()),
+            ("market_id", pa.string()),
+            ("captured_at_utc", pa.timestamp("us", tz="UTC")),
+            ("status", pa.string()),
+            ("volume_24h", pa.float64()),
+            ("liquidity", pa.float64()),
+            ("end_date", pa.timestamp("us", tz="UTC")),
+            ("raw_json", pa.string()),
+        ]
+    )
+
+
 def snapshot_row(
     venue: str,
     market_id: str,
@@ -217,6 +290,20 @@ def snapshot_row(
         "mid": round((bid + ask) / 2, 4),
         "spread": round(ask - bid, 4),
         "snapshot_source": source,
+    }
+
+
+def metadata_row(venue: str, market_id: str, timestamp: datetime) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "venue": venue,
+        "market_id": market_id,
+        "captured_at_utc": timestamp,
+        "status": "open",
+        "volume_24h": 10_000.0,
+        "liquidity": 1_000.0,
+        "end_date": timestamp + timedelta(days=1),
+        "raw_json": "{}",
     }
 
 
