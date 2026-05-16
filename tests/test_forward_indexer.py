@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -26,9 +27,11 @@ from data.forward_indexer.runner import (
     IndexerRunner,
     RunnerConfig,
     current_memory_mb,
+    metadata_record,
     ranked_markets,
 )
 from data.forward_indexer.schemas import (
+    MARKET_METADATA_SCHEMA_VERSION,
     SCHEMA_VERSION,
     market_metadata_snapshot_schema,
     order_book_snapshot_schema,
@@ -42,6 +45,18 @@ def test_forward_indexer_schemas_include_version() -> None:
     assert market_metadata_snapshot_schema().field("schema_version").type.bit_width == 16
 
 
+def test_market_metadata_schema_includes_status_v2_fields() -> None:
+    schema = market_metadata_snapshot_schema()
+
+    assert schema.field("venue_status_raw").type == pa.string()
+    assert schema.field("is_closed").type == pa.bool_()
+    assert schema.field("is_archived").type == pa.bool_()
+    assert schema.field("is_resolved").type == pa.bool_()
+    assert schema.field("resolution_outcome").type == pa.string()
+    assert schema.field("resolution_timestamp_utc").type == pa.timestamp("us", tz="UTC")
+    assert schema.field("accepting_orders").type == pa.bool_()
+
+
 def test_partition_path_generation(tmp_path: Path) -> None:
     writer = BufferedParquetWriter(tmp_path)
     path = writer.partition_dir(
@@ -51,6 +66,164 @@ def test_partition_path_generation(tmp_path: Path) -> None:
     )
 
     assert path == tmp_path / "order_book_snapshots" / "venue=polymarket" / "date=2026-05-13"
+
+
+def test_polymarket_metadata_status_fields_from_payload() -> None:
+    indexer = PolymarketIndexer(base_url="https://clob.test", client=MockAsyncClient())
+
+    market = indexer._market_from_payload(
+        {
+            "conditionId": "pm1",
+            "question": "Will this resolve yes?",
+            "active": False,
+            "closed": True,
+            "archived": False,
+            "acceptingOrders": False,
+            "endDate": "2026-05-16T12:00:00Z",
+            "resolutionTime": "2026-05-16T13:15:00Z",
+            "winningOutcome": "Yes",
+            "clobTokenIds": '["yes-token", "no-token"]',
+        }
+    )
+
+    assert market is not None
+    assert market.status == "active"
+    assert market.venue_status_raw == "closed"
+    assert market.is_closed is True
+    assert market.is_archived is False
+    assert market.is_resolved is True
+    assert market.resolution_outcome == "YES"
+    assert market.resolution_timestamp_utc == datetime(2026, 5, 16, 13, 15, tzinfo=UTC)
+    assert market.accepting_orders is False
+
+
+def test_polymarket_resolved_by_address_is_not_resolution_signal() -> None:
+    indexer = PolymarketIndexer(base_url="https://clob.test", client=MockAsyncClient())
+
+    market = indexer._market_from_payload(
+        {
+            "conditionId": "pm-active",
+            "question": "Still active?",
+            "active": True,
+            "closed": False,
+            "archived": False,
+            "acceptingOrders": True,
+            "resolvedBy": "0x2F5e3684cb1F318ec51b00Edba38d79Ac2c0aA9d",
+        }
+    )
+
+    assert market is not None
+    assert market.venue_status_raw == "active"
+    assert market.is_closed is False
+    assert market.is_archived is False
+    assert market.is_resolved is False
+    assert market.resolution_outcome is None
+    assert market.accepting_orders is True
+
+
+def test_kalshi_metadata_status_fields_from_payload() -> None:
+    indexer = KalshiIndexer(
+        base_url="https://kalshi.test",
+        client=MockAsyncClient(),
+        request_delay_seconds=0,
+    )
+
+    market = indexer._market_from_payload(
+        {
+            "ticker": "KXTEST",
+            "title": "Kalshi test",
+            "status": "settled",
+            "close_time": "2026-05-16T12:00:00Z",
+            "settlement_time": "2026-05-16T12:05:30Z",
+            "result": "YES",
+        }
+    )
+
+    assert market is not None
+    assert market.status == "settled"
+    assert market.venue_status_raw == "settled"
+    assert market.is_closed is True
+    assert market.is_archived is False
+    assert market.is_resolved is True
+    assert market.resolution_outcome == "YES"
+    assert market.resolution_timestamp_utc == datetime(2026, 5, 16, 12, 5, 30, tzinfo=UTC)
+    assert market.accepting_orders is False
+
+
+def test_metadata_record_writes_schema_v2_status_fields() -> None:
+    captured_at = datetime(2026, 5, 16, 12, tzinfo=UTC)
+    market = MarketDescriptor(
+        venue="kalshi",
+        market_id="KXTEST",
+        question="Test",
+        status="settled",
+        venue_status_raw="settled",
+        is_closed=True,
+        is_archived=False,
+        is_resolved=True,
+        resolution_outcome="NO",
+        resolution_timestamp_utc=captured_at,
+        accepting_orders=False,
+    )
+
+    record = metadata_record(market, captured_at=captured_at)
+
+    assert record["schema_version"] == MARKET_METADATA_SCHEMA_VERSION
+    assert record["venue_status_raw"] == "settled"
+    assert record["is_closed"] is True
+    assert record["is_archived"] is False
+    assert record["is_resolved"] is True
+    assert record["resolution_outcome"] == "NO"
+    assert record["resolution_timestamp_utc"] == captured_at
+    assert record["accepting_orders"] is False
+
+
+def test_old_metadata_parquet_reads_with_new_nullable_status_columns(tmp_path: Path) -> None:
+    old_schema = pa.schema(
+        [
+            ("schema_version", pa.int16()),
+            ("venue", pa.string()),
+            ("market_id", pa.string()),
+            ("captured_at_utc", pa.timestamp("us", tz="UTC")),
+            ("status", pa.string()),
+            ("volume_24h", pa.float64()),
+            ("liquidity", pa.float64()),
+            ("end_date", pa.timestamp("us", tz="UTC")),
+            ("raw_json", pa.string()),
+        ]
+    )
+    path = tmp_path / "old.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "schema_version": 1,
+                    "venue": "polymarket",
+                    "market_id": "pm-old",
+                    "captured_at_utc": datetime(2026, 5, 16, 12, tzinfo=UTC),
+                    "status": "True",
+                    "volume_24h": 1000.0,
+                    "liquidity": 500.0,
+                    "end_date": datetime(2026, 5, 17, 12, tzinfo=UTC),
+                    "raw_json": "{}",
+                }
+            ],
+            schema=old_schema,
+        ),
+        path,
+    )
+
+    table = pq.read_table(path, schema=market_metadata_snapshot_schema())
+    row = table.to_pylist()[0]
+
+    assert row["market_id"] == "pm-old"
+    assert row["venue_status_raw"] is None
+    assert row["is_closed"] is None
+    assert row["is_archived"] is None
+    assert row["is_resolved"] is None
+    assert row["resolution_outcome"] is None
+    assert row["resolution_timestamp_utc"] is None
+    assert row["accepting_orders"] is None
 
 
 @pytest.mark.asyncio
@@ -977,6 +1150,44 @@ async def test_discover_once_writes_metadata_only_for_tracked_markets(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_discover_once_writes_final_snapshot_for_resolved_dropped_market(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(tz=UTC)
+    previous_market = MarketDescriptor(
+        venue="polymarket",
+        market_id="pm-dropping",
+        question="Dropping",
+        volume_24h=20_000,
+        spread=0.05,
+        last_trade_at=now - timedelta(hours=1),
+        created_at=now - timedelta(hours=2),
+        end_date=now + timedelta(hours=4),
+    )
+    indexer = TerminalRefreshIndexer(previous_market)
+    writer = BufferedParquetWriter(tmp_path, flush_max_records=100)
+    runner = IndexerRunner(
+        config=RunnerConfig(output_dir=tmp_path),
+        indexers=[indexer],
+        writer=writer,
+    )
+    runner._tracked_markets = {"polymarket": [previous_market]}
+
+    await runner.discover_once()
+
+    files = list((tmp_path / "market_metadata_snapshots").rglob("*.parquet"))
+    rows = [row for path in files for row in pq.ParquetFile(path).read().to_pylist()]
+    assert len(rows) == 1
+    assert rows[0]["market_id"] == "pm-dropping"
+    assert rows[0]["venue_status_raw"] == "closed"
+    assert rows[0]["is_closed"] is True
+    assert rows[0]["is_resolved"] is True
+    assert rows[0]["resolution_outcome"] == "YES"
+    assert runner._tracked_markets["polymarket"] == []
+    assert indexer.fetch_count == 1
+
+
+@pytest.mark.asyncio
 async def test_runner_stop_interrupts_long_sleep(tmp_path: Path) -> None:
     runner = IndexerRunner(
         config=RunnerConfig(
@@ -1188,6 +1399,49 @@ class StaticDiscoverIndexer(VenueIndexer):
 
     async def discover_markets(self) -> list[MarketDescriptor]:
         return list(self.markets)
+
+    async def subscribe_books(self, markets: list[MarketDescriptor]) -> None:
+        raise AssertionError("metadata test should not subscribe")
+
+    async def subscribe_trades(self, markets: list[MarketDescriptor]) -> None:
+        raise AssertionError("metadata test should not subscribe")
+
+    async def current_book_state(self, market_id: str) -> BookState | None:
+        return None
+
+    async def flush_pending(self) -> None:
+        return None
+
+    def stats(self) -> VenueStats:
+        return self._stats
+
+
+class TerminalRefreshIndexer(VenueIndexer):
+    venue = "polymarket"
+
+    def __init__(self, market: MarketDescriptor) -> None:
+        self.market = market
+        self.fetch_count = 0
+        self._stats = VenueStats(venue=self.venue)
+
+    async def discover_markets(self) -> list[MarketDescriptor]:
+        return []
+
+    async def fetch_market_metadata(self, market: MarketDescriptor) -> MarketDescriptor:
+        self.fetch_count += 1
+        assert market.market_id == self.market.market_id
+        return MarketDescriptor(
+            venue=self.venue,
+            market_id=market.market_id,
+            question=market.question,
+            status="closed",
+            venue_status_raw="closed",
+            is_closed=True,
+            is_archived=False,
+            is_resolved=True,
+            resolution_outcome="YES",
+            accepting_orders=False,
+        )
 
     async def subscribe_books(self, markets: list[MarketDescriptor]) -> None:
         raise AssertionError("metadata test should not subscribe")

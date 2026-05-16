@@ -22,7 +22,7 @@ from .filters import (
     activity_filter_rejection_reason,
     empty_rejection_counts,
 )
-from .schemas import SCHEMA_VERSION, TableName
+from .schemas import MARKET_METADATA_SCHEMA_VERSION, TableName
 from .storage import BufferedParquetWriter
 
 
@@ -117,6 +117,10 @@ class IndexerRunner:
             min_time_to_close_hours=self.config.min_time_to_close_hours,
         )
         captured_at = datetime.now(tz=UTC)
+        previous_tracked = {
+            venue: {market.market_id: market for market in markets}
+            for venue, markets in self._tracked_markets.items()
+        }
         discovered = await asyncio.gather(
             *(indexer.discover_markets() for indexer in self.indexers)
         )
@@ -139,9 +143,16 @@ class IndexerRunner:
                     rejection_counts[rejection_reason] += 1
             tracked_candidates = len(tracked)
             tracked = ranked_markets(tracked)[: self.config.max_tracked_markets_per_venue]
+            final_metadata_markets = await _final_metadata_before_drop(
+                indexer=indexer,
+                previous_tracked=previous_tracked.get(indexer.venue, {}),
+                discovered=markets,
+                tracked=tracked,
+            )
             self._tracked_markets[indexer.venue] = tracked
             if not self.config.dry_run:
-                for chunk in _chunks(tracked, 1_000):
+                metadata_markets = tracked + final_metadata_markets
+                for chunk in _chunks(metadata_markets, 1_000):
                     metadata_rows = [
                         metadata_record(market, captured_at=captured_at) for market in chunk
                     ]
@@ -288,7 +299,7 @@ def metadata_record(market: MarketDescriptor, *, captured_at: datetime) -> dict[
     """Return a parquet-ready metadata snapshot row."""
 
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": MARKET_METADATA_SCHEMA_VERSION,
         "venue": market.venue,
         "market_id": market.market_id,
         "captured_at_utc": captured_at,
@@ -296,6 +307,13 @@ def metadata_record(market: MarketDescriptor, *, captured_at: datetime) -> dict[
         "volume_24h": market.volume_24h,
         "liquidity": market.liquidity,
         "end_date": market.end_date,
+        "venue_status_raw": market.venue_status_raw,
+        "is_closed": market.is_closed,
+        "is_archived": market.is_archived,
+        "is_resolved": market.is_resolved,
+        "resolution_outcome": market.resolution_outcome,
+        "resolution_timestamp_utc": market.resolution_timestamp_utc,
+        "accepting_orders": market.accepting_orders,
         "raw_json": json.dumps(market.raw, default=str, sort_keys=True),
     }
 
@@ -312,6 +330,37 @@ def ranked_markets(markets: list[MarketDescriptor]) -> list[MarketDescriptor]:
         ),
         reverse=True,
     )
+
+
+async def _final_metadata_before_drop(
+    *,
+    indexer: VenueIndexer,
+    previous_tracked: dict[str, MarketDescriptor],
+    discovered: list[MarketDescriptor],
+    tracked: list[MarketDescriptor],
+) -> list[MarketDescriptor]:
+    """Return one terminal metadata snapshot for markets leaving the tracked set."""
+
+    tracked_ids = {market.market_id for market in tracked}
+    final_markets: dict[str, MarketDescriptor] = {}
+    for market in discovered:
+        if market.market_id not in tracked_ids and _is_terminal_market(market):
+            final_markets[market.market_id] = market
+
+    discovered_ids = {market.market_id for market in discovered}
+    fetch = getattr(indexer, "fetch_market_metadata", None)
+    if fetch is not None:
+        for market_id, market in previous_tracked.items():
+            if market_id in tracked_ids or market_id in discovered_ids:
+                continue
+            refreshed = await fetch(market)
+            if refreshed is not None and _is_terminal_market(refreshed):
+                final_markets[market_id] = refreshed
+    return list(final_markets.values())
+
+
+def _is_terminal_market(market: MarketDescriptor) -> bool:
+    return market.is_closed is True or market.is_resolved is True
 
 
 def _chunks(markets: list[MarketDescriptor], size: int) -> list[list[MarketDescriptor]]:

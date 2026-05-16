@@ -7,6 +7,7 @@ from enum import StrEnum
 import pyarrow as pa
 
 SCHEMA_VERSION = 1
+MARKET_METADATA_SCHEMA_VERSION = 2
 
 
 class TableName(StrEnum):
@@ -73,6 +74,13 @@ def market_metadata_snapshot_schema() -> pa.Schema:
             ("volume_24h", pa.float64()),
             ("liquidity", pa.float64()),
             ("end_date", pa.timestamp("us", tz="UTC")),
+            ("venue_status_raw", pa.string()),
+            ("is_closed", pa.bool_()),
+            ("is_archived", pa.bool_()),
+            ("is_resolved", pa.bool_()),
+            ("resolution_outcome", pa.string()),
+            ("resolution_timestamp_utc", pa.timestamp("us", tz="UTC")),
+            ("accepting_orders", pa.bool_()),
             ("raw_json", pa.string()),
         ]
     )

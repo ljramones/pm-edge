@@ -183,6 +183,23 @@ class KalshiIndexer(VenueIndexer):
             source="reconstructed_from_complement",
         )
 
+    async def fetch_market_metadata(self, market: MarketDescriptor) -> MarketDescriptor | None:
+        """Fetch one market metadata payload directly by ticker."""
+
+        try:
+            payload = await self._request_json(f"{self.base_url}/markets/{market.market_id}")
+        except httpx.HTTPStatusError as exc:
+            self._stats.errors_since_heartbeat += 1
+            self._logger.warning(
+                "kalshi_metadata_refresh_skipped",
+                market_id=market.market_id,
+                status_code=exc.response.status_code,
+            )
+            return None
+        raw_market = payload.get("market")
+        item = raw_market if isinstance(raw_market, dict) else payload
+        return self._market_from_payload(item)
+
     async def _book_ws_loop(self, markets: list[MarketDescriptor]) -> None:
         backoff = 1.0
         market_ids = [market.market_id for market in markets]
@@ -310,13 +327,32 @@ class KalshiIndexer(VenueIndexer):
         yes_bid = _normalized_price(item.get("yes_bid") or item.get("yes_bid_dollars"))
         yes_ask = _normalized_price(item.get("yes_ask") or item.get("yes_ask_dollars"))
         spread = yes_ask - yes_bid if yes_bid is not None and yes_ask is not None else None
+        venue_status_raw = str(item.get("status") or "unknown")
+        status_lower = venue_status_raw.lower()
+        resolution_outcome = _kalshi_resolution_outcome(item)
+        resolution_timestamp = (
+            _parse_datetime(
+                item.get("settlement_time")
+                or item.get("settled_time")
+                or item.get("settlement_timestamp")
+            )
+            if status_lower == "settled"
+            else None
+        )
         return MarketDescriptor(
             venue=self.venue,
             market_id=ticker,
             question=str(item.get("title") or item.get("event_title") or ticker),
             token_id_yes=f"{ticker}:yes",
             token_id_no=f"{ticker}:no",
-            status=str(item.get("status") or "unknown"),
+            status=venue_status_raw,
+            venue_status_raw=venue_status_raw,
+            is_closed=status_lower in {"closed", "settled"},
+            is_archived=False,
+            is_resolved=status_lower == "settled",
+            resolution_outcome=resolution_outcome,
+            resolution_timestamp_utc=resolution_timestamp,
+            accepting_orders=status_lower == "active",
             volume_24h=_float_or_none(
                 item.get("volume_24h") or item.get("volume_24h_fp") or item.get("volume")
             ),
@@ -386,6 +422,27 @@ def _compact_raw(item: dict[str, Any]) -> dict[str, Any]:
         for key, value in item.items()
         if value is None or isinstance(value, (str, int, float, bool))
     }
+
+
+def _kalshi_resolution_outcome(item: dict[str, Any]) -> str | None:
+    for field in ("settlement_value", "settlement_result", "result"):
+        outcome = _normalized_yes_no(item.get(field))
+        if outcome is not None:
+            return outcome
+    return None
+
+
+def _normalized_yes_no(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {"yes", "y", "true", "1"}:
+        return "YES"
+    if text in {"no", "n", "false", "0"}:
+        return "NO"
+    return None
 
 
 def _float_or_none(value: Any) -> float | None:

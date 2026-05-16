@@ -26,6 +26,13 @@ class MarketDescriptor:
     end_date: datetime | None = None
     last_trade_at: datetime | None = None
     created_at: datetime | None = None
+    venue_status_raw: str | None = None
+    is_closed: bool | None = None
+    is_archived: bool | None = None
+    is_resolved: bool | None = None
+    resolution_outcome: str | None = None
+    resolution_timestamp_utc: datetime | None = None
+    accepting_orders: bool | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 

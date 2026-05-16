@@ -239,6 +239,21 @@ class PolymarketIndexer(VenueIndexer):
             self.books[market.market_id] = state
         await state.replace(bids=bids, asks=asks, source="rest")
 
+    async def fetch_market_metadata(self, market: MarketDescriptor) -> MarketDescriptor | None:
+        """Fetch one market metadata payload directly by condition id."""
+
+        try:
+            payload = await self._request_json(f"{self.base_url}/markets/{market.market_id}")
+        except httpx.HTTPStatusError as exc:
+            self._stats.errors_since_heartbeat += 1
+            self._logger.warning(
+                "polymarket_metadata_refresh_skipped",
+                market_id=market.market_id,
+                status_code=exc.response.status_code,
+            )
+            return None
+        return self._market_from_payload(payload)
+
     async def _book_ws_loop(self, markets: list[MarketDescriptor]) -> None:
         backoff = 1.0
         asset_ids = [market.token_id_yes for market in markets if market.token_id_yes]
@@ -389,6 +404,19 @@ class PolymarketIndexer(VenueIndexer):
         market_id = str(item.get("condition_id") or item.get("conditionId") or item.get("id") or "")
         if not market_id:
             return None
+        closed = _bool_or_none(item.get("closed"))
+        active = _bool_or_none(item.get("active"))
+        archived = _bool_or_none(item.get("archived"))
+        accepting_orders = _bool_or_none(item.get("acceptingOrders"))
+        resolution_outcome = _polymarket_resolution_outcome(item)
+        resolution_timestamp = _parse_datetime(
+            item.get("resolutionTime")
+            or item.get("resolution_time")
+            or item.get("resolvedAt")
+            or item.get("resolved_at")
+            or item.get("closedTime")
+            or item.get("closed_time")
+        )
         raw_tokens = item.get("tokens")
         tokens: list[Any] = raw_tokens if isinstance(raw_tokens, list) else []
         clob_token_ids = _list_from_jsonish(item.get("clobTokenIds") or item.get("clob_token_ids"))
@@ -409,6 +437,22 @@ class PolymarketIndexer(VenueIndexer):
             token_id_yes=token_id_yes,
             token_id_no=token_id_no,
             status=str(item.get("active") or item.get("status") or "active"),
+            venue_status_raw=_polymarket_status_raw(
+                closed=closed,
+                active=active,
+                archived=archived,
+            ),
+            is_closed=closed,
+            is_archived=archived,
+            is_resolved=_polymarket_is_resolved(
+                item,
+                closed=closed,
+                resolution_outcome=resolution_outcome,
+                resolution_timestamp=resolution_timestamp,
+            ),
+            resolution_outcome=resolution_outcome,
+            resolution_timestamp_utc=resolution_timestamp,
+            accepting_orders=accepting_orders,
             volume_24h=_float_or_none(
                 item.get("volume_24hr")
                 or item.get("volume24hr")
@@ -477,6 +521,97 @@ def _compact_raw(item: dict[str, Any]) -> dict[str, Any]:
         for key, value in item.items()
         if value is None or isinstance(value, (str, int, float, bool))
     }
+
+
+def _polymarket_status_raw(
+    *,
+    closed: bool | None,
+    active: bool | None,
+    archived: bool | None,
+) -> str:
+    if closed is True and archived is True:
+        return "archived"
+    if closed is True:
+        return "closed"
+    if closed is False and active is True:
+        return "active"
+    if closed is False and active is False:
+        return "inactive"
+    if archived is True:
+        return "archived"
+    if active is True:
+        return "active"
+    if active is False:
+        return "inactive"
+    return "unknown"
+
+
+def _polymarket_is_resolved(
+    item: dict[str, Any],
+    *,
+    closed: bool | None,
+    resolution_outcome: str | None,
+    resolution_timestamp: datetime | None,
+) -> bool:
+    if resolution_outcome is not None or resolution_timestamp is not None:
+        return True
+    statuses = _list_from_jsonish(
+        item.get("umaResolutionStatuses") or item.get("uma_resolution_statuses")
+    )
+    status_text = " ".join(str(status).lower() for status in statuses)
+    status_text += " "
+    status_text += str(
+        item.get("umaResolutionStatus") or item.get("uma_resolution_status") or ""
+    ).lower()
+    return closed is True and any(
+        marker in status_text for marker in ("resolved", "settled", "final")
+    )
+
+
+def _polymarket_resolution_outcome(item: dict[str, Any]) -> str | None:
+    for field in (
+        "resolvedOutcome",
+        "resolved_outcome",
+        "winningOutcome",
+        "winning_outcome",
+        "winner",
+        "outcome",
+    ):
+        outcome = _normalized_yes_no(item.get(field))
+        if outcome is not None:
+            return outcome
+    index_value = item.get("winningOutcomeIndex") or item.get("winning_outcome_index")
+    if index_value is not None:
+        try:
+            return "YES" if int(index_value) == 0 else "NO"
+        except (TypeError, ValueError):
+            return None
+    resolved_by = item.get("resolvedBy") or item.get("resolved_by")
+    return _normalized_yes_no(resolved_by)
+
+
+def _normalized_yes_no(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"yes", "y", "true", "1"}:
+        return "YES"
+    if text in {"no", "n", "false", "0"}:
+        return "NO"
+    return None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y"}:
+        return True
+    if text in {"false", "0", "no", "n"}:
+        return False
+    return None
 
 
 def _levels_from_payload(levels: list[Any]) -> list[dict[str, float]]:
