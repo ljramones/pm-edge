@@ -425,6 +425,73 @@ async def test_polymarket_book_message_replaces_state_from_websocket() -> None:
 
 
 @pytest.mark.asyncio
+async def test_polymarket_trade_message_preserves_venue_trade_id() -> None:
+    market = MarketDescriptor(
+        venue="polymarket",
+        market_id="m1",
+        question="Test",
+        token_id_yes="yes-token",
+        token_id_no="no-token",
+    )
+    indexer = PolymarketIndexer(
+        base_url="https://clob.polymarket.com",
+        client=MockAsyncClient(),
+    )
+
+    await indexer._handle_ws_message(
+        json.dumps(
+            {
+                "event_type": "last_trade_price",
+                "asset_id": "yes-token",
+                "trade_id": "poly-trade-123",
+                "price": "0.42",
+                "size": "12.5",
+                "side": "buy",
+                "timestamp": "1715987512345",
+            }
+        ),
+        [market],
+    )
+
+    trades = await indexer.drain_trade_events()
+
+    assert len(trades) == 1
+    assert trades[0]["trade_id_venue"] == "poly-trade-123"
+    assert trades[0]["timestamp_utc"] == datetime.fromtimestamp(1715987512.345, tz=UTC)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_trade_message_uses_synthetic_id_when_missing() -> None:
+    market = MarketDescriptor(
+        venue="polymarket",
+        market_id="m1",
+        question="Test",
+        token_id_yes="yes-token",
+        token_id_no="no-token",
+    )
+    indexer = PolymarketIndexer(
+        base_url="https://clob.polymarket.com",
+        client=MockAsyncClient(),
+    )
+    message = {
+        "event_type": "last_trade_price",
+        "asset_id": "yes-token",
+        "price": "0.42",
+        "size": "12.5",
+        "side": "buy",
+        "timestamp": "1715987512345",
+    }
+
+    await indexer._handle_ws_message(json.dumps([message, message]), [market])
+
+    trades = await indexer.drain_trade_events()
+
+    assert len(trades) == 2
+    assert trades[0]["trade_id_venue"].startswith("synthetic:")
+    assert trades[0]["trade_id_venue"] == trades[1]["trade_id_venue"]
+
+
+@pytest.mark.asyncio
 async def test_polymarket_discovery_uses_gamma_active_filter() -> None:
     client = RecordingAsyncClient(
         [

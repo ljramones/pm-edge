@@ -94,6 +94,50 @@ def test_book_state_quality(tmp_path: Path) -> None:
     assert df.iloc[0]["pct_with_top_bid"] == 1.0
 
 
+def test_capture_freshness(tmp_path: Path) -> None:
+    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+    now = datetime(2026, 5, 15, 2, 5, tzinfo=UTC)
+
+    df = queries.capture_freshness(con, now=now, expected_cadence_seconds=15)
+
+    assert {"latest_snapshot_utc", "snapshot_age_minutes", "pct_expected_snapshots"}.issubset(
+        df.columns
+    )
+    assert set(df["venue"]) == {"polymarket", "kalshi"}
+    assert df[df["venue"] == "polymarket"].iloc[0]["snapshot_age_minutes"] == 60.0
+
+
+def test_snapshot_gaps_includes_missing_buckets(tmp_path: Path) -> None:
+    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+
+    df = queries.snapshot_gaps(con, venue="polymarket", bucket="20 minutes")
+
+    assert {"venue", "bucket", "snapshot_count", "venue_median", "threshold_count"}.issubset(
+        df.columns
+    )
+    assert 0 in set(df["snapshot_count"])
+
+
+def test_book_validity(tmp_path: Path) -> None:
+    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+
+    df = queries.book_validity(con)
+
+    assert {"pct_crossed_books", "pct_invalid_price_rows", "pct_with_top_both"}.issubset(df.columns)
+    assert df["pct_crossed_books"].sum() == 0.0
+    assert df["pct_with_top_both"].min() == 1.0
+
+
+def test_spread_depth_summary(tmp_path: Path) -> None:
+    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+
+    df = queries.spread_depth_summary(con)
+
+    assert {"spread_p50", "spread_p90", "avg_bid_depth", "avg_ask_depth"}.issubset(df.columns)
+    assert df["avg_bid_depth"].min() == 10.0
+    assert df["avg_ask_depth"].min() == 8.0
+
+
 def test_market_movement(tmp_path: Path) -> None:
     con = queries.get_connection(write_forward_index_fixture(tmp_path))
 
@@ -122,6 +166,47 @@ def test_trade_volume_by_market(tmp_path: Path) -> None:
 
     assert {"venue", "market_id", "trades", "contracts", "notional"}.issubset(df.columns)
     assert set(df["market_id"]) == {"poly-1", "kalshi-1"}
+
+
+def test_trade_overview(tmp_path: Path) -> None:
+    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+
+    df = queries.trade_overview(con)
+
+    assert {"trades", "markets_with_trades", "notional", "duplicate_trade_ids"}.issubset(df.columns)
+    assert int(df["trades"].sum()) == 3
+    assert int(df["duplicate_trade_ids"].sum()) == 0
+
+
+def test_metadata_universe(tmp_path: Path) -> None:
+    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+
+    df = queries.metadata_universe(con)
+
+    assert {"metadata_rows", "markets", "volume_24h_p50", "avg_hours_to_close"}.issubset(df.columns)
+    assert int(df.iloc[0]["markets"]) == 1
+    assert df.iloc[0]["avg_hours_to_close"] == 24.0
+
+
+def test_data_integrity_checks(tmp_path: Path) -> None:
+    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+
+    df = queries.data_integrity_checks(con)
+
+    assert {"table_name", "check_name", "issue_count"}.issubset(df.columns)
+    duplicate_snapshots = df[df["check_name"] == "duplicate_snapshot_keys"].iloc[0]
+    assert int(duplicate_snapshots["issue_count"]) == 0
+
+
+def test_analysis_readiness(tmp_path: Path) -> None:
+    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+
+    df = queries.analysis_readiness(con, min_snapshots=2, min_distinct_top_bids=2)
+
+    ready = df[df["is_analysis_ready"]]
+    not_ready = df[~df["is_analysis_ready"]]
+    assert set(ready["market_id"]) == {"poly-1", "kalshi-1"}
+    assert "low_snapshots" in set(not_ready["exclusion_reason"])
 
 
 def test_multi_timescale_aggregation(tmp_path: Path) -> None:

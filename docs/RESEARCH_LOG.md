@@ -193,6 +193,57 @@ First serious application is queued: when the MeshForge OBJ parser bottleneck is
 
 **Open question:** Whether OpenEvolve's prompt-evolution mode fits the system messages that eventually drive pm-edge's archetype evaluators. The reasoning is recursive: archetype evaluators use prompts; those prompts can be evolved; but the fitness function would be backtest performance on resolved markets, which carries the same overfitting risk as evolving the strategy code directly. Resolution requires more thought once archetype evaluators exist and produce measurable outputs. Flagged for revisit, not pursued now.
 
+## Entry 10 — 41-hour forward data quality assessment [TOOL ASSESSMENT, 2026-05-16]
+
+Codex inspected the local forward-index parquet archive at latest snapshot timestamp `2026-05-16 13:01:21 -04`, after about 41 hours of capture.
+
+**Verdict:** The captured data is good enough for operational monitoring and first-pass market exploration. It is not yet enough for strategy validation.
+
+**Strong points:**
+
+- `3,961,853` order-book snapshots captured across Polymarket and Kalshi.
+- Polymarket has `2,168,075` snapshots in the latest 24-hour window across `584` markets.
+- Polymarket source mix is `99.84%` WebSocket and `0.16%` REST in the latest 24-hour window.
+- No crossed books, invalid prices, or non-positive spreads were found for either venue in the latest 24-hour window.
+- Polymarket spreads are tight in aggregate: median spread `0.002`, p90 spread `0.020`.
+- Kalshi book parsing is working: `101,331` snapshots in the latest 24-hour window across `136` markets, median spread `0.01`, p90 spread `0.04`.
+
+**Weak points:**
+
+- Trade capture is Polymarket-only so far. Kalshi trade capture remains absent/deferred.
+- Polymarket `trade_id_venue` is empty for all `53,166` captured trade rows. Aggregate trade-flow analysis remains possible, but trade-level deduplication and trade-to-book reconstruction are not reliable until this is fixed.
+- Top-of-book completeness is imperfect. In the latest 24-hour window, Polymarket has both top bid and top ask in `79.88%` of snapshots; Kalshi has both in `88.29%`.
+- Polymarket empty bid levels are high at `19.82%`; Kalshi empty asks are `7.75%`.
+- Latest 24-hour gap check found `6` low 5-minute buckets out of `288` for Polymarket and `56` low 5-minute buckets out of `261` for Kalshi.
+
+**Analysis-ready universe under the first-pass screen:**
+
+Criteria: at least 100 snapshots, observed top-book movement, mean spread no greater than `0.10`, and mostly complete top book.
+
+- Polymarket: `231` markets ready, `316` rejected for no top-book movement, `30` rejected for incomplete top book, `4` rejected for low snapshots, `3` rejected for wide or missing spread.
+- Kalshi: `52` markets ready, `71` rejected for no top-book movement, `11` rejected for incomplete top book, `2` rejected for wide or missing spread.
+
+**Action items:**
+
+- Fix empty Polymarket `trade_id_venue` extraction in `src/data/forward_indexer/polymarket.py`.
+- Defer Kalshi gap closure to the signed WebSocket-auth phase.
+- Defer top-of-book completeness investigation until after trade-ID repair unless the gap worsens.
+
+**Unlocked analysis work:**
+
+- Spread and depth distribution studies by venue and market category.
+- Activity classification using the actual analysis-ready universe rather than raw tracked-market counts.
+- Identification of anchor markets with the most top-of-book movement for manual "explain this market" investigations.
+- Execution simulator input-contract design against real captured book-state schema.
+
+**Still off-limits:**
+
+- PnL backtests against this forward archive.
+- Predictive model training on this archive.
+- Category-level claims about strategy effectiveness.
+
+This assessment marks the project as materially past the pre-Phase-1 data-quality failure mode. The data is now honest enough to reveal its own limitations, which is different from the legacy signals dataset where the limitations were hidden inside derived features and fallback paths.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 from collections.abc import Awaitable, Callable
@@ -269,7 +270,7 @@ class PolymarketIndexer(VenueIndexer):
             market = token_to_market.get(token_id)
             if event_type in {"price_change", "book", "orderbook"}:
                 await self._apply_book_message(message, token_to_market, market)
-            elif event_type in {"trade", "last_trade_price"}:
+            elif event_type in {"trade", "last_trade_price", "trade_executed"}:
                 if market is None:
                     continue
                 self._append_trade(market, message, token_id)
@@ -339,17 +340,27 @@ class PolymarketIndexer(VenueIndexer):
         size = _float_or_none(message.get("size") or message.get("amount"))
         if price is None or size is None:
             return
+        timestamp_utc = _trade_timestamp(message) or datetime.now(tz=UTC)
+        side = str(message.get("side") or "").lower()
         self.trade_buffer.append(
             {
                 "schema_version": SCHEMA_VERSION,
                 "venue": self.venue,
                 "market_id": market.market_id,
                 "token_id": token_id,
-                "timestamp_utc": datetime.now(tz=UTC),
+                "timestamp_utc": timestamp_utc,
                 "price": price,
                 "size": size,
-                "side": str(message.get("side") or "").lower(),
-                "trade_id_venue": str(message.get("id") or message.get("trade_id") or ""),
+                "side": side,
+                "trade_id_venue": _trade_id_venue(
+                    message=message,
+                    market_id=market.market_id,
+                    token_id=token_id,
+                    timestamp_utc=timestamp_utc,
+                    price=price,
+                    size=size,
+                    side=side,
+                ),
             }
         )
 
@@ -500,6 +511,74 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _trade_id_venue(
+    *,
+    message: dict[str, Any],
+    market_id: str,
+    token_id: str,
+    timestamp_utc: datetime,
+    price: float,
+    size: float,
+    side: str,
+) -> str:
+    for field in (
+        "trade_id",
+        "tradeId",
+        "id",
+        "hash",
+        "tx_hash",
+        "transaction_hash",
+        "transactionHash",
+        "taker_order_id",
+        "takerOrderId",
+        "maker_order_id",
+        "makerOrderId",
+    ):
+        value = message.get(field)
+        if value:
+            return str(value)
+    digest = hashlib.sha256(
+        "|".join(
+            [
+                market_id,
+                token_id,
+                timestamp_utc.isoformat(),
+                f"{price:.12g}",
+                f"{size:.12g}",
+                side,
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"synthetic:{digest}"
+
+
+def _trade_timestamp(message: dict[str, Any]) -> datetime | None:
+    value = (
+        message.get("timestamp")
+        or message.get("time")
+        or message.get("created_at")
+        or message.get("createdAt")
+    )
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return _timestamp_from_epoch(float(value))
+    text = str(value)
+    parsed = _parse_datetime(text)
+    if parsed is not None:
+        return parsed
+    try:
+        return _timestamp_from_epoch(float(text))
+    except ValueError:
+        return None
+
+
+def _timestamp_from_epoch(value: float) -> datetime:
+    if value > 10_000_000_000:
+        value /= 1000.0
+    return datetime.fromtimestamp(value, tz=UTC)
 
 
 def _parse_datetime(value: Any) -> datetime | None:
