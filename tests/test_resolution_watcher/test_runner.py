@@ -10,6 +10,7 @@ from data.resolution_watcher.runner import (
     ResolutionWatcherRunner,
     detect_resolution_candidates,
     find_final_book_snapshot,
+    load_seen_resolutions,
 )
 from data.resolution_watcher.schema import (
     FinalBookSnapshot,
@@ -70,6 +71,12 @@ class FailingClient(FakeClient):
         final_snapshot: FinalBookSnapshot,
     ) -> ResolvedMarketOutcome | None:
         raise RuntimeError("venue failed")
+
+
+class StopAfterOneCycleRunner(ResolutionWatcherRunner):
+    async def run_once(self) -> None:
+        await super().run_once()
+        await self.stop()
 
 
 @pytest.mark.asyncio
@@ -288,6 +295,50 @@ def test_detect_resolution_candidates_limits_to_recent_metadata(
 
     assert detection.metadata_candidates_seen == 0
     assert detection.candidates == []
+
+
+@pytest.mark.asyncio
+async def test_runner_loads_seen_resolutions_on_startup(
+    source_archive: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "resolved"
+    settings = ResolutionWatcherSettings(
+        source_dir=source_archive,
+        output_dir=output_dir,
+        venues_enabled=["polymarket"],
+        poll_cadence_seconds=60,
+    )
+    first = ResolutionWatcherRunner(settings=settings, clients={"polymarket": FakeClient()})
+    await first.run_once()
+    assert first.total_resolved_since_start == 1
+
+    second = StopAfterOneCycleRunner(settings=settings, clients={"polymarket": FakeClient()})
+    await second.run()
+
+    assert ("polymarket", "poly-1") in second.seen_resolutions
+    assert second.total_resolved_since_start == 0
+
+
+def test_load_seen_resolutions_handles_missing_output_dir(tmp_path: Path) -> None:
+    assert load_seen_resolutions(tmp_path / "missing") == set()
+
+
+@pytest.mark.asyncio
+async def test_load_seen_resolutions_reads_existing_parquet(
+    source_archive: Path,
+    tmp_path: Path,
+) -> None:
+    settings = ResolutionWatcherSettings(
+        source_dir=source_archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": FakeClient()})
+
+    await runner.run_once()
+
+    assert load_seen_resolutions(tmp_path / "resolved") == {("polymarket", "poly-1")}
 
 
 def test_find_final_book_snapshot(source_archive: Path, base_time: datetime) -> None:

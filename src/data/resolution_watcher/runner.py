@@ -71,6 +71,7 @@ class ResolutionWatcherRunner:
 
     async def run(self) -> None:
         self._install_signal_handlers()
+        self.seen_resolutions.update(load_seen_resolutions(self.settings.output_dir))
         while not self._stop.is_set():
             started = datetime.now(tz=UTC)
             await self.run_once()
@@ -322,6 +323,28 @@ def _metadata_columns(con: duckdb.DuckDBPyConnection, path: str) -> set[str]:
         f"DESCRIBE SELECT * FROM read_parquet({path}, union_by_name = true)"
     ).fetchall()
     return {str(row[0]) for row in rows}
+
+
+def load_seen_resolutions(output_dir: Path) -> set[tuple[str, str]]:
+    """Return persisted ``(venue, market_id)`` pairs from prior watcher runs."""
+
+    if not output_dir.exists() or not any(output_dir.rglob("*.parquet")):
+        return set()
+    con = duckdb.connect()
+    try:
+        path = _sql_string(str(output_dir / "**" / "*.parquet"))
+        columns = _metadata_columns(con, path)
+        if not {"venue", "market_id"}.issubset(columns):
+            return set()
+        rows = con.execute(f"""
+            SELECT DISTINCT venue, market_id
+            FROM read_parquet({path}, union_by_name = true)
+            WHERE venue IS NOT NULL
+              AND market_id IS NOT NULL
+            """).fetchall()
+    finally:
+        con.close()
+    return {(str(row[0]), str(row[1])) for row in rows}
 
 
 def find_final_book_snapshot(
