@@ -75,18 +75,25 @@ class ResolutionWatcherRunner:
     async def run(self) -> None:
         self._install_signal_handlers()
         self.seen_resolutions.update(load_seen_resolutions(self.settings.output_dir))
-        while not self._stop.is_set():
-            started = datetime.now(tz=UTC)
-            await self.run_once()
-            await self._emit_heartbeat()
-            elapsed = (datetime.now(tz=UTC) - started).total_seconds()
-            sleep_time = max(0.0, self.settings.poll_cadence_seconds - elapsed)
-            if await self._sleep_or_stop(sleep_time):
-                break
+        try:
+            while not self._stop.is_set():
+                started = datetime.now(tz=UTC)
+                await self.run_once()
+                await self._emit_heartbeat()
+                elapsed = (datetime.now(tz=UTC) - started).total_seconds()
+                sleep_time = max(0.0, self.settings.poll_cadence_seconds - elapsed)
+                if await self._sleep_or_stop(sleep_time):
+                    break
+        finally:
+            await asyncio.gather(
+                *(client.close() for client in self.clients.values()),
+                return_exceptions=True,
+            )
 
     async def stop(self) -> None:
+        """Signal the runner to stop after the current cycle completes."""
+
         self._stop.set()
-        await asyncio.gather(*(client.close() for client in self.clients.values()))
 
     async def run_once(self) -> None:
         detected_at = datetime.now(tz=UTC)

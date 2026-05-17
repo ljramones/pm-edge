@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -36,6 +37,7 @@ class FakeClient:
 
     def __init__(self) -> None:
         self.fetch_count = 0
+        self.close_count = 0
 
     async def fetch_resolution_outcome(
         self,
@@ -60,7 +62,7 @@ class FakeClient:
         )
 
     async def close(self) -> None:
-        return None
+        self.close_count += 1
 
 
 class FailingClient(FakeClient):
@@ -109,6 +111,16 @@ class StopAfterOneCycleRunner(ResolutionWatcherRunner):
     async def run_once(self) -> None:
         await super().run_once()
         await self.stop()
+
+
+class StopImmediatelyRunner(ResolutionWatcherRunner):
+    async def run_once(self) -> None:
+        await self.stop()
+
+
+class RaisingRunner(ResolutionWatcherRunner):
+    async def run_once(self) -> None:
+        raise RuntimeError("cycle failed")
 
 
 @pytest.mark.asyncio
@@ -185,6 +197,83 @@ async def test_runner_uses_api_fallback_for_closed_unresolved_market(
     assert runner.total_resolved_since_start == 1
     assert client.fetch_count == 1
     assert runner.api_fallbacks_since_heartbeat == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_signals_without_closing_clients(
+    source_archive: Path,
+    tmp_path: Path,
+) -> None:
+    settings = ResolutionWatcherSettings(
+        source_dir=source_archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    client = FakeClient()
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.stop()
+
+    assert runner._stop.is_set()
+    assert client.close_count == 0
+
+
+@pytest.mark.asyncio
+async def test_run_closes_clients_after_stop_exits_loop(
+    source_archive: Path,
+    tmp_path: Path,
+) -> None:
+    settings = ResolutionWatcherSettings(
+        source_dir=source_archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+        poll_cadence_seconds=60,
+    )
+    client = FakeClient()
+    runner = StopImmediatelyRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.run()
+
+    assert client.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_closes_clients_when_cycle_raises(
+    source_archive: Path,
+    tmp_path: Path,
+) -> None:
+    settings = ResolutionWatcherSettings(
+        source_dir=source_archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    client = FakeClient()
+    runner = RaisingRunner(settings=settings, clients={"polymarket": client})
+
+    with pytest.raises(RuntimeError, match="cycle failed"):
+        await runner.run()
+
+    assert client.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_signal_handler_stop_pattern_signals_without_closing_clients(
+    source_archive: Path,
+    tmp_path: Path,
+) -> None:
+    settings = ResolutionWatcherSettings(
+        source_dir=source_archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    client = FakeClient()
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    task = asyncio.create_task(runner.stop())
+    await task
+
+    assert runner._stop.is_set()
+    assert client.close_count == 0
 
 
 @pytest.mark.asyncio
