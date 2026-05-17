@@ -52,3 +52,4 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+rsync_data.sh
