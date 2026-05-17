@@ -19,6 +19,38 @@ rsync -avz --partial -e "ssh -i ~/.ssh/pm_edge_rsync" \
 
 The script does not use `--ignore-existing`. Rsync's normal archive-mode size and mtime checks avoid recopying unchanged parquet parts while still repairing interrupted or partial local files on a later run.
 
+## Mount Safety
+
+When either local destination is under `/Volumes/`, the script verifies that the named volume is mounted before creating destination directories or running rsync. If the external drive is ejected:
+
+- The script exits `0` with an informational message.
+- Cron does not trigger an error email.
+- The next sync after reattaching the drive proceeds normally.
+
+This prevents the failure mode where `/Volumes/pm-edge-archive/` is created as a regular directory on the laptop's internal disk and data is silently synced there.
+
+Manual verification scenarios:
+
+```bash
+# Relative or non-/Volumes destination: check is a no-op.
+PM_EDGE_VPS_HOST="pmedge@<ip>" \
+PM_EDGE_LOCAL_FORWARD_INDEX_DIR="data/raw/forward_index" \
+PM_EDGE_LOCAL_RESOLVED_DIR="data/raw/resolved_market_outcomes" \
+bash -n deploy/forward_indexer/rsync_to_laptop.sh
+
+# Missing external volume: exits 0 before mkdir or rsync.
+PM_EDGE_VPS_HOST="pmedge@<ip>" \
+PM_EDGE_LOCAL_FORWARD_INDEX_DIR="/Volumes/DefinitelyMissingPmEdgeVolume/forward_index" \
+PM_EDGE_LOCAL_RESOLVED_DIR="/Volumes/DefinitelyMissingPmEdgeVolume/resolved_market_outcomes" \
+bash deploy/forward_indexer/rsync_to_laptop.sh
+
+# Mounted external volume: proceeds to normal rsync behavior.
+PM_EDGE_VPS_HOST="pmedge@<ip>" \
+PM_EDGE_LOCAL_FORWARD_INDEX_DIR="/Volumes/pm-edge-archive/pm-edge-data/forward_index" \
+PM_EDGE_LOCAL_RESOLVED_DIR="/Volumes/pm-edge-archive/pm-edge-data/resolved_market_outcomes" \
+bash deploy/forward_indexer/rsync_to_laptop.sh
+```
+
 The script reads these environment variables:
 
 - `PM_EDGE_VPS_HOST`: required, for example `pmedge@<droplet-ip>`.

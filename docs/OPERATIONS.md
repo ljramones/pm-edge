@@ -170,6 +170,8 @@ $PM_EDGE_LOCAL_RESOLVED_DIR
 
 The script uses `rsync -avz --partial` and relies on rsync size/mtime checks to avoid re-copying unchanged parquet files while still repairing interrupted partial transfers.
 
+When a local destination is under `/Volumes/`, the script first verifies that the external volume is actually mounted. If the drive is ejected, it exits `0` with an informational message and does not create `/Volumes/pm-edge-archive/` as a regular directory on the internal disk. This keeps cron quiet while preventing accidental internal-disk syncs.
+
 Verify the local archive:
 
 ```bash

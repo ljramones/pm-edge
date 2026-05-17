@@ -8,6 +8,23 @@ LOCAL_FORWARD_INDEX_DIR="${PM_EDGE_LOCAL_FORWARD_INDEX_DIR:-data/raw/forward_ind
 LOCAL_FORWARD_PARENT="$(dirname "${LOCAL_FORWARD_INDEX_DIR%/}")"
 LOCAL_RESOLVED_DIR="${PM_EDGE_LOCAL_RESOLVED_DIR:-${LOCAL_FORWARD_PARENT}/resolved_market_outcomes/}"
 
+check_volume_mounted() {
+  local path="$1"
+  local volume
+
+  if [[ "${path}" =~ ^(/Volumes/[^/]+) ]]; then
+    volume="${BASH_REMATCH[1]}"
+    if ! mount | grep -q " on ${volume} "; then
+      echo "[$(date -u +%FT%TZ)] External volume ${volume} is not mounted. Skipping rsync."
+      echo "[$(date -u +%FT%TZ)] This is expected when the drive is ejected; reattach it to resume daily syncs."
+      exit 0
+    fi
+  fi
+}
+
+check_volume_mounted "${LOCAL_FORWARD_INDEX_DIR}"
+check_volume_mounted "${LOCAL_RESOLVED_DIR}"
+
 mkdir -p "${LOCAL_FORWARD_INDEX_DIR}"
 mkdir -p "${LOCAL_RESOLVED_DIR}"
 
