@@ -622,6 +622,114 @@ Calibration analysis is highly sensitive to capture-timing artifacts. Future ana
 
 These remain next-iteration research questions once more data accumulates.
 
+## Entry 21 — Static depth imbalance, null result [ANALYSIS, 2026-05-17]
+
+**Hypothesis**
+
+Top-of-book or total-depth imbalance at the moment of final-book capture predicts resolution outcome beyond what implied probability alone predicts.
+
+**Method**
+
+Used the lag-clean subset of `102` markets: positive lag, under `4h`, all Kalshi. Compared YES versus NO outcomes through within-implied-probability-bin imbalance differences, then ran logistic regressions.
+
+**Result**
+
+- Within-bin comparison is inconsistent. Top imbalance favors YES in `2` of `3` testable bins, but total-depth imbalance favors YES in only `1` of `3` bins. Magnitudes are within sampling noise.
+- Logistic regression: `implied_prob` alone gives pseudo R² `0.27` and AIC `106.91`.
+- Adding `top_imbalance` or `total_imbalance` produces p-values of `0.47-0.50` and increases AIC by `1.5-3.3` points.
+- No evidence appears for independent signal from static depth imbalance.
+
+**Conclusion**
+
+At the moment of final-book capture, static depth imbalance does not predict outcomes beyond mid-price. Markets in this sample are sufficiently efficient that directional information in the order book is already incorporated into price.
+
+**Caveat**
+
+The sample is `102` Kalshi markets, mostly MLB. Results may differ for other venues, market types, or capture timestamps farther from resolution.
+
+**Next research directions**
+
+1. Temporal price dynamics, including velocity and volatility, over the captured snapshot stream rather than final-only snapshots.
+2. Calibration at multiple time horizons, including `1h`, `6h`, and `24h` before resolution, to test whether mispricing exists earlier and converges away before resolution.
+3. Per-category analysis with sufficient samples, requiring roughly `50+` Eurovision-style markets and `100+` Polymarket markets before drawing category-level conclusions.
+
+## Entry 22 — Temporal price dynamics before resolution [ANALYSIS, 2026-05-17]
+
+**Hypothesis**
+
+Price trajectory in the two hours before final-book capture predicts resolution outcome beyond the final mid-price level. A market arriving at a `0.40` implied probability from above may carry different information than a market arriving at `0.40` from below.
+
+**Method**
+
+Used the same lag-clean resolution population as Entry 19: positive lag and under `4h` between final captured book and venue resolution timestamp. For each resolved market, queried the order book snapshot stream from `T-120m` to final-book time and extracted:
+
+- `mid_final`
+- `mid_30`, `mid_60`, `mid_120`
+- `velocity_30min`, `velocity_60min`, `velocity_120min`
+- volatility of mid prices over the `T-120m` to `T-30m` window
+
+The regression tests use only markets with complete temporal features.
+
+**Sample sizes**
+
+- Resolutions with paired book state: `111`
+- Lag-clean resolved markets: `73`
+- Venue split after lag filtering: `73` Kalshi, `0` Polymarket
+- Markets with at least `5` snapshots in the `120m` window: `73`
+- Markets with full temporal features: `35`
+
+The full-feature requirement is much stricter than the final-snapshot analyses because each market needs usable snapshots near `T-30m`, `T-60m`, and `T-120m`.
+
+**Regression results**
+
+Baseline model: `resolved_value ~ mid_final`
+
+- Pseudo R²: `0.4115`
+- AIC: `31.18`
+
+Model: `resolved_value ~ mid_final + velocity_60min`
+
+- Pseudo R²: `0.4115`
+- AIC: `33.18`
+- `velocity_60min` coefficient: `3.76`
+- p-value: `0.996`
+- Likelihood-ratio p-value versus baseline: `0.9957`
+
+Model: `resolved_value ~ mid_final + velocity_120min`
+
+- Pseudo R²: `0.4132`
+- AIC: `33.10`
+- `velocity_120min` coefficient: `58.17`
+- p-value: `0.789`
+- Likelihood-ratio p-value versus baseline: `0.7830`
+
+Model: `resolved_value ~ mid_final + volatility`
+
+- Pseudo R²: `0.5658`
+- AIC: `26.05`
+- `volatility` coefficient: `-66.06`
+- coefficient p-value: `0.056`
+- Likelihood-ratio p-value versus baseline: `0.0076`
+
+**Result**
+
+Price velocity is a clean null in this sample. Neither `velocity_60min` nor `velocity_120min` improves fit beyond final mid-price. AIC worsens by roughly `2` points and likelihood-ratio p-values are near `0.8-1.0`.
+
+Volatility is different. The model with volatility improves AIC from `31.18` to `26.05`, and the likelihood-ratio test is significant at `p=0.0076`. The coefficient is negative and borderline by its own standard error (`p=0.056`), suggesting that higher pre-resolution volatility is associated with lower realized YES probability after controlling for final mid-price. This is not yet a strategy signal, but it is the first order-book-derived feature in these analyses that improves model fit after controlling for price level.
+
+**Interpretation**
+
+The simple momentum/reversal hypothesis is not supported. The final price level captures the directional information contained in recent velocity.
+
+The volatility result is worth tracking but not acting on. The sample is only `35` full-feature markets, all Kalshi, likely dominated by MLB. The result may reflect a sports-market artifact, noisy late-game books, or a genuine uncertainty signal. It requires a larger sample and category segmentation before it belongs in any strategy logic.
+
+**Next research directions**
+
+1. Re-run temporal dynamics after a week of accumulated resolutions, targeting at least `100+` full-feature markets.
+2. Segment volatility by category and venue before interpreting it as a general signal.
+3. Test earlier horizons, especially `6h` and `24h` before resolution, where convergence artifacts are weaker and mispricing is more plausible.
+4. Compare volatility to spread and liquidity to determine whether the feature is measuring information uncertainty or simply thin-book noise.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
