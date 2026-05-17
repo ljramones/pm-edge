@@ -156,6 +156,72 @@ async def test_runner_uses_api_fallback_for_closed_unresolved_market(
 
 
 @pytest.mark.asyncio
+async def test_runner_uses_detection_time_for_final_book_when_resolution_time_missing(
+    tmp_path: Path,
+    base_time: datetime,
+) -> None:
+    archive = tmp_path / "forward_index"
+    row = metadata_row(
+        "polymarket",
+        "poly-no-venue-time",
+        base_time,
+        base_time - timedelta(hours=1),
+        "closed",
+        {"conditionId": "poly-no-venue-time"},
+        is_resolved=True,
+        is_closed=True,
+        resolution_outcome="YES",
+    )
+    row["resolution_timestamp_utc"] = None
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / "date=2026-05-16"
+        / "part.parquet",
+        [row],
+        metadata_schema(),
+    )
+    earlier_snapshot = snapshot_row(
+        "polymarket",
+        "poly-no-venue-time",
+        base_time - timedelta(minutes=10),
+    )
+    latest_snapshot = snapshot_row(
+        "polymarket",
+        "poly-no-venue-time",
+        base_time + timedelta(minutes=5),
+    )
+    latest_snapshot["top_bid"] = 0.88
+    latest_snapshot["top_ask"] = 0.92
+    latest_snapshot["spread"] = 0.04
+    write_table(
+        archive / "order_book_snapshots" / "venue=polymarket" / "date=2026-05-16" / "part.parquet",
+        [earlier_snapshot, latest_snapshot],
+        snapshot_schema(),
+    )
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": FakeClient()})
+
+    await runner.run_once()
+
+    rows = [
+        row
+        for path in (tmp_path / "resolved").glob("venue=polymarket/date=*/*.parquet")
+        for row in pq.ParquetFile(path).read().to_pylist()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["final_top_bid"] == 0.88
+    assert rows[0]["final_top_ask"] == 0.92
+    assert rows[0]["final_spread"] == 0.04
+    assert rows[0]["final_snapshot_timestamp_utc"] == latest_snapshot["timestamp_utc"]
+
+
+@pytest.mark.asyncio
 async def test_runner_deduplicates_seen_resolutions(
     source_archive: Path,
     tmp_path: Path,

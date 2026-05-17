@@ -107,11 +107,12 @@ class ResolutionWatcherRunner:
                 written: list[ResolvedMarketOutcome] = []
                 api_fallbacks_used = 0
                 for candidate in candidates:
+                    snapshot_anchor = candidate.resolution_timestamp_utc or detected_at
                     final_snapshot = find_final_book_snapshot(
                         self.settings.source_dir,
                         venue=venue,
                         market_id=candidate.market_id,
-                        before=detected_at,
+                        before=snapshot_anchor,
                     )
                     if self.settings.dry_run:
                         continue
