@@ -31,6 +31,7 @@ class ResolutionWatcherSettings(BaseSettings):
     metadata_lookback_days: int = Field(default=7, ge=1)
     disappeared_lookback_hours: int = Field(default=24, ge=1)
     disappeared_max_checks_per_cycle: int = Field(default=50, ge=1)
+    lag_tolerance_seconds: int = Field(default=5, ge=0)
     api_concurrency_limit: int = Field(
         default=10,
         ge=1,

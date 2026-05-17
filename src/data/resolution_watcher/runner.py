@@ -69,8 +69,42 @@ class ResolutionWatcherRunner:
         self.disappeared_candidates_since_heartbeat = 0
         self.disappeared_resolutions_since_heartbeat = 0
         self.disappeared_skipped_as_still_active_since_heartbeat = 0
+        self.negative_lag_rejections_since_heartbeat = 0
         self._logger = get_logger(__name__)
         self._stop = asyncio.Event()
+
+    def _lookup_final_snapshot(
+        self,
+        *,
+        venue: str,
+        market_id: str,
+        before: datetime,
+        anchor_source: str,
+    ) -> FinalBookSnapshot:
+        lookup = find_final_book_snapshot(
+            self.settings.source_dir,
+            venue=venue,
+            market_id=market_id,
+            before=before,
+            lag_tolerance_seconds=self.settings.lag_tolerance_seconds,
+        )
+        if lookup.post_anchor_rejected_count:
+            self.negative_lag_rejections_since_heartbeat += lookup.post_anchor_rejected_count
+            self._logger.info(
+                "resolution_watcher_post_anchor_snapshot_rejected",
+                venue=venue,
+                market_id=market_id,
+                anchor_source=anchor_source,
+                anchor_utc=_to_utc(before).isoformat(),
+                lag_tolerance_seconds=self.settings.lag_tolerance_seconds,
+                rejected_count=lookup.post_anchor_rejected_count,
+                final_snapshot_timestamp_utc=(
+                    None
+                    if lookup.snapshot.timestamp_utc is None
+                    else _to_utc(lookup.snapshot.timestamp_utc).isoformat()
+                ),
+            )
+        return lookup.snapshot
 
     async def run(self) -> None:
         self._install_signal_handlers()
@@ -181,12 +215,17 @@ class ResolutionWatcherRunner:
         async def process_with_limit(
             candidate: MarketResolutionCandidate,
         ) -> CandidateProcessingResult:
+            anchor_source = (
+                "venue_resolution_time"
+                if candidate.resolution_timestamp_utc is not None
+                else "detected_at"
+            )
             snapshot_anchor = candidate.resolution_timestamp_utc or detected_at
-            final_snapshot = find_final_book_snapshot(
-                self.settings.source_dir,
+            final_snapshot = self._lookup_final_snapshot(
                 venue=venue,
                 market_id=candidate.market_id,
                 before=snapshot_anchor,
+                anchor_source=anchor_source,
             )
             if self.settings.dry_run:
                 return CandidateProcessingResult(outcome=None)
@@ -232,21 +271,33 @@ class ResolutionWatcherRunner:
         detected_at: datetime,
         semaphore: asyncio.Semaphore,
     ) -> ResolvedMarketOutcome | None:
-        final_snapshot = find_final_book_snapshot(
-            self.settings.source_dir,
-            venue=venue,
-            market_id=candidate.market_id,
-            before=detected_at,
-        )
+        stub_snapshot = FinalBookSnapshot(None, None, None, None)
         async with semaphore:
             outcome = await client.fetch_resolution_outcome(
                 candidate,
                 detected_at=detected_at,
-                final_snapshot=final_snapshot,
+                final_snapshot=stub_snapshot,
             )
         if outcome is None:
             return None
-        return replace(outcome, is_disappeared_detection=True)
+        snapshot_anchor = outcome.venue_resolved_at_utc or detected_at
+        anchor_source = (
+            "venue_resolution_time" if outcome.venue_resolved_at_utc is not None else "detected_at"
+        )
+        final_snapshot = self._lookup_final_snapshot(
+            venue=venue,
+            market_id=candidate.market_id,
+            before=snapshot_anchor,
+            anchor_source=anchor_source,
+        )
+        return replace(
+            outcome,
+            final_top_bid=final_snapshot.top_bid,
+            final_top_ask=final_snapshot.top_ask,
+            final_spread=final_snapshot.spread,
+            final_snapshot_timestamp_utc=final_snapshot.timestamp_utc,
+            is_disappeared_detection=True,
+        )
 
     async def _process_disappeared_candidate_batch(
         self,
@@ -360,6 +411,7 @@ class ResolutionWatcherRunner:
             disappeared_resolutions_detected=self.disappeared_resolutions_since_heartbeat,
             markets_resolved_this_cycle=self.resolved_since_heartbeat,
             total_resolved_since_start=self.total_resolved_since_start,
+            negative_lag_rejections_detected=self.negative_lag_rejections_since_heartbeat,
         )
         self.markets_checked_since_heartbeat = 0
         self.resolved_since_heartbeat = 0
@@ -369,6 +421,7 @@ class ResolutionWatcherRunner:
         self.disappeared_candidates_since_heartbeat = 0
         self.disappeared_resolutions_since_heartbeat = 0
         self.disappeared_skipped_as_still_active_since_heartbeat = 0
+        self.negative_lag_rejections_since_heartbeat = 0
 
     async def _sleep_or_stop(self, seconds: float) -> bool:
         try:
@@ -737,18 +790,38 @@ def load_seen_resolutions(output_dir: Path) -> set[tuple[str, str]]:
     return {(str(row[0]), str(row[1])) for row in rows}
 
 
+@dataclass(frozen=True)
+class FinalBookSnapshotLookup:
+    """Result of locating the final pre-resolution book snapshot.
+
+    ``post_anchor_rejected_count`` reports captures whose timestamp falls
+    inside ``[anchor - lag_tolerance, +inf)`` for the requested market. These
+    rows are excluded from selection (see Research Log Entry 19) and the count
+    is surfaced so the runner can log negative-lag rejections per cycle.
+    """
+
+    snapshot: FinalBookSnapshot
+    post_anchor_rejected_count: int = 0
+
+
 def find_final_book_snapshot(
     source_dir: Path,
     *,
     venue: str,
     market_id: str,
     before: datetime,
-) -> FinalBookSnapshot:
+    lag_tolerance_seconds: int = 0,
+) -> FinalBookSnapshotLookup:
     snapshot_dir = source_dir / "order_book_snapshots" / f"venue={venue}"
+    empty = FinalBookSnapshot(None, None, None, None)
     if not snapshot_dir.exists():
-        return FinalBookSnapshot(None, None, None, None)
+        return FinalBookSnapshotLookup(empty)
+    anchor = _to_utc(before)
+    cutoff = anchor - timedelta(seconds=max(lag_tolerance_seconds, 0))
+    cutoff_iso = cutoff.isoformat()
     con = duckdb.connect()
     best: tuple[str | None, float | None, float | None, float | None] | None = None
+    post_anchor_rejected = 0
     try:
         for chunk in _chunks(sorted(snapshot_dir.glob("date=*/*.parquet")), 128):
             if not chunk:
@@ -763,26 +836,38 @@ def find_final_book_snapshot(
                     spread
                 FROM read_parquet({path_list})
                 WHERE market_id = ?
-                  AND timestamp_utc <= CAST(? AS TIMESTAMPTZ)
+                  AND timestamp_utc < CAST(? AS TIMESTAMPTZ)
                 ORDER BY timestamp_utc DESC
                 LIMIT 1
                 """,
-                [market_id, _to_utc(before).isoformat()],
+                [market_id, cutoff_iso],
             ).fetchone()
-            if row is None:
-                continue
-            if best is None or _parse_datetime(row[0]) > _parse_datetime(best[0]):
+            if row is not None and (
+                best is None or _parse_datetime(row[0]) > _parse_datetime(best[0])
+            ):
                 best = row
+            rejected_row = con.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM read_parquet({path_list})
+                WHERE market_id = ?
+                  AND timestamp_utc >= CAST(? AS TIMESTAMPTZ)
+                """,
+                [market_id, cutoff_iso],
+            ).fetchone()
+            if rejected_row is not None and rejected_row[0] is not None:
+                post_anchor_rejected += int(rejected_row[0])
     finally:
         con.close()
     if best is None:
-        return FinalBookSnapshot(None, None, None, None)
-    return FinalBookSnapshot(
+        return FinalBookSnapshotLookup(empty, post_anchor_rejected_count=post_anchor_rejected)
+    snapshot = FinalBookSnapshot(
         top_bid=None if best[1] is None else float(best[1]),
         top_ask=None if best[2] is None else float(best[2]),
         spread=None if best[3] is None else float(best[3]),
         timestamp_utc=_parse_datetime(best[0]),
     )
+    return FinalBookSnapshotLookup(snapshot, post_anchor_rejected_count=post_anchor_rejected)
 
 
 async def main_loop(settings: ResolutionWatcherSettings) -> None:

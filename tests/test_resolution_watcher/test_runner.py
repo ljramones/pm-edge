@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from data.resolution_watcher.runner import (
+    FinalBookSnapshotLookup,
     ResolutionWatcherRunner,
     detect_disappeared_candidates,
     detect_resolution_candidates,
@@ -1080,13 +1081,244 @@ async def test_load_seen_resolutions_reads_existing_parquet(
 
 
 def test_find_final_book_snapshot(source_archive: Path, base_time: datetime) -> None:
-    snapshot = find_final_book_snapshot(
+    lookup = find_final_book_snapshot(
         source_archive,
         venue="polymarket",
         market_id="poly-1",
         before=base_time,
     )
 
-    assert snapshot.top_bid == 0.40
-    assert snapshot.top_ask == 0.60
-    assert snapshot.spread == 0.20
+    assert isinstance(lookup, FinalBookSnapshotLookup)
+    assert lookup.snapshot.top_bid == 0.40
+    assert lookup.snapshot.top_ask == 0.60
+    assert lookup.snapshot.spread == 0.20
+    assert lookup.post_anchor_rejected_count == 0
+
+
+def test_find_final_book_snapshot_rejects_post_resolution_capture(
+    tmp_path: Path, base_time: datetime
+) -> None:
+    archive = tmp_path / "forward_index"
+    snapshot_path = (
+        archive / "order_book_snapshots" / "venue=polymarket" / "date=2026-05-16" / "part.parquet"
+    )
+    write_table(
+        snapshot_path,
+        [
+            snapshot_row("polymarket", "poly-late", base_time - timedelta(minutes=10)),
+            snapshot_row("polymarket", "poly-late", base_time + timedelta(seconds=10)),
+        ],
+        snapshot_schema(),
+    )
+
+    lookup = find_final_book_snapshot(
+        archive,
+        venue="polymarket",
+        market_id="poly-late",
+        before=base_time,
+        lag_tolerance_seconds=5,
+    )
+
+    assert lookup.snapshot.timestamp_utc == base_time - timedelta(minutes=10)
+    assert lookup.post_anchor_rejected_count == 1
+
+
+def test_find_final_book_snapshot_clock_skew_tolerance_boundaries(
+    tmp_path: Path, base_time: datetime
+) -> None:
+    archive = tmp_path / "forward_index"
+    snapshot_path = (
+        archive / "order_book_snapshots" / "venue=polymarket" / "date=2026-05-16" / "part.parquet"
+    )
+    write_table(
+        snapshot_path,
+        [
+            snapshot_row("polymarket", "poly-skew", base_time + timedelta(seconds=3)),
+            snapshot_row("polymarket", "poly-skew", base_time + timedelta(seconds=7)),
+        ],
+        snapshot_schema(),
+    )
+
+    within_tolerance = find_final_book_snapshot(
+        archive,
+        venue="polymarket",
+        market_id="poly-skew",
+        before=base_time + timedelta(seconds=10),
+        lag_tolerance_seconds=5,
+    )
+    assert within_tolerance.snapshot.timestamp_utc == base_time + timedelta(seconds=3)
+    assert within_tolerance.post_anchor_rejected_count == 1
+
+    outside_tolerance = find_final_book_snapshot(
+        archive,
+        venue="polymarket",
+        market_id="poly-skew",
+        before=base_time,
+        lag_tolerance_seconds=5,
+    )
+    assert outside_tolerance.snapshot.timestamp_utc is None
+    assert outside_tolerance.post_anchor_rejected_count == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_main_path_rejects_post_resolution_snapshot(
+    tmp_path: Path, base_time: datetime
+) -> None:
+    archive = tmp_path / "forward_index"
+    resolution_time = base_time - timedelta(minutes=5)
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / "date=2026-05-16"
+        / "part.parquet",
+        [
+            {
+                **metadata_row(
+                    "polymarket",
+                    "poly-late-meta",
+                    base_time,
+                    base_time - timedelta(hours=1),
+                    "closed",
+                    {"closed": True, "conditionId": "poly-late-meta"},
+                ),
+                "resolution_timestamp_utc": resolution_time,
+            }
+        ],
+        metadata_schema(),
+    )
+    write_table(
+        archive / "order_book_snapshots" / "venue=polymarket" / "date=2026-05-16" / "part.parquet",
+        [
+            snapshot_row("polymarket", "poly-late-meta", resolution_time - timedelta(minutes=15)),
+            snapshot_row("polymarket", "poly-late-meta", resolution_time + timedelta(seconds=30)),
+        ],
+        snapshot_schema(),
+    )
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": FakeClient()})
+
+    await runner.run_once()
+
+    rows = [
+        row
+        for path in (tmp_path / "resolved").glob("venue=polymarket/date=*/*.parquet")
+        for row in pq.ParquetFile(path).read().to_pylist()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["final_snapshot_timestamp_utc"] == resolution_time - timedelta(minutes=15)
+    assert runner.negative_lag_rejections_since_heartbeat == 1
+
+
+class VenueTimestampedApiClient(FakeClient):
+    """API client that returns a venue-published resolution timestamp."""
+
+    def __init__(self, *, venue: str, venue_resolved_at_utc: datetime) -> None:
+        super().__init__()
+        self.venue = venue
+        self.venue_resolved_at_utc = venue_resolved_at_utc
+        self.observed_snapshots: list[FinalBookSnapshot] = []
+
+    async def fetch_resolution_outcome(
+        self,
+        candidate: MarketResolutionCandidate,
+        *,
+        detected_at: datetime,
+        final_snapshot: FinalBookSnapshot,
+    ) -> ResolvedMarketOutcome | None:
+        self.fetch_count += 1
+        self.observed_snapshots.append(final_snapshot)
+        return ResolvedMarketOutcome(
+            venue=candidate.venue,
+            market_id=candidate.market_id,
+            resolution_timestamp_utc=detected_at,
+            venue_resolved_at_utc=self.venue_resolved_at_utc,
+            resolved_value=1.0,
+            resolution_source=f"{candidate.venue}_api",
+            final_top_bid=final_snapshot.top_bid,
+            final_top_ask=final_snapshot.top_ask,
+            final_spread=final_snapshot.spread,
+            final_snapshot_timestamp_utc=final_snapshot.timestamp_utc,
+            metadata_snapshot_id=candidate.metadata_snapshot_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_runner_disappeared_path_uses_venue_resolved_at_utc(tmp_path: Path) -> None:
+    now = datetime.now(tz=UTC)
+    venue_resolved_at = now - timedelta(hours=2)
+    archive = tmp_path / "forward_index"
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / f"date={now.date().isoformat()}"
+        / "part.parquet",
+        [
+            metadata_row(
+                "polymarket",
+                "poly-disappeared-venue",
+                now - timedelta(hours=3),
+                now + timedelta(hours=1),
+                "active",
+                {"conditionId": "poly-disappeared-venue"},
+                is_resolved=False,
+                is_closed=False,
+                resolution_outcome=None,
+            )
+        ],
+        metadata_schema(),
+    )
+    write_table(
+        archive
+        / "order_book_snapshots"
+        / "venue=polymarket"
+        / f"date={now.date().isoformat()}"
+        / "part.parquet",
+        [
+            snapshot_row(
+                "polymarket",
+                "poly-disappeared-venue",
+                venue_resolved_at - timedelta(minutes=2),
+            ),
+            snapshot_row(
+                "polymarket",
+                "poly-disappeared-venue",
+                venue_resolved_at + timedelta(minutes=30),
+            ),
+        ],
+        snapshot_schema(),
+    )
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    client = VenueTimestampedApiClient(venue="polymarket", venue_resolved_at_utc=venue_resolved_at)
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.run_once()
+
+    rows = [
+        row
+        for path in (tmp_path / "resolved").glob("venue=polymarket/date=*/*.parquet")
+        for row in pq.ParquetFile(path).read().to_pylist()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["final_snapshot_timestamp_utc"] == venue_resolved_at - timedelta(minutes=2)
+    assert rows[0]["is_disappeared_detection"] is True
+    assert client.observed_snapshots == [FinalBookSnapshot(None, None, None, None)]
+    assert runner.negative_lag_rejections_since_heartbeat == 1
+
+
+def test_resolution_watcher_settings_lag_tolerance_default_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert ResolutionWatcherSettings().lag_tolerance_seconds == 5
+
+    monkeypatch.setenv("PM_EDGE_RESOLUTION_WATCHER_LAG_TOLERANCE_SECONDS", "12")
+    assert ResolutionWatcherSettings().lag_tolerance_seconds == 12
