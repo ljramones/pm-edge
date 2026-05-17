@@ -135,6 +135,8 @@ PM_EDGE_VPS_HOST=pmedge@YOUR_DROPLET_IP \
 
 The script is idempotent and uses rsync size/mtime checks instead of `--ignore-existing`, so unchanged parquet parts are not re-copied and interrupted partial transfers can be repaired on the next run.
 
+The same script also pulls resolution-watcher output from `/opt/pm-edge/data/raw/resolved_market_outcomes` into `$PM_EDGE_LOCAL_RESOLVED_DIR`. If that variable is unset, the destination defaults to a sibling `resolved_market_outcomes/` directory next to `$PM_EDGE_LOCAL_FORWARD_INDEX_DIR`.
+
 ## Capacity Estimate
 
 Rough depth-5 book snapshot shape:

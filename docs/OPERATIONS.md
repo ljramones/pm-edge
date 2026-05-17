@@ -145,6 +145,7 @@ Set these environment variables on the laptop:
 ```bash
 export PM_EDGE_VPS_HOST="pmedge@<vps-ip>"
 export PM_EDGE_LOCAL_FORWARD_INDEX_DIR="$HOME/pm-edge-data/forward_index"
+export PM_EDGE_LOCAL_RESOLVED_DIR="$HOME/pm-edge-data/resolved_market_outcomes"
 ```
 
 Run a sync:
@@ -157,12 +158,14 @@ The script copies from:
 
 ```text
 /opt/pm-edge/data/raw/forward_index/
+/opt/pm-edge/data/raw/resolved_market_outcomes/
 ```
 
 to:
 
 ```text
 $PM_EDGE_LOCAL_FORWARD_INDEX_DIR
+$PM_EDGE_LOCAL_RESOLVED_DIR
 ```
 
 The script uses `rsync -avz --partial` and relies on rsync size/mtime checks to avoid re-copying unchanged parquet files while still repairing interrupted partial transfers.
@@ -171,7 +174,9 @@ Verify the local archive:
 
 ```bash
 du -sh "$PM_EDGE_LOCAL_FORWARD_INDEX_DIR"
+du -sh "$PM_EDGE_LOCAL_RESOLVED_DIR"
 find "$PM_EDGE_LOCAL_FORWARD_INDEX_DIR" -maxdepth 2 -type d | sort
+find "$PM_EDGE_LOCAL_RESOLVED_DIR" -maxdepth 2 -type d | sort
 ```
 
 DuckDB smoke check:
