@@ -85,9 +85,29 @@ class KalshiResolutionClient:
 
 
 def _resolved_value(payload: dict[str, Any]) -> float | None:
-    for key in ("expiration_value", "result", "settlement_result", "settlement_value"):
-        if payload.get(key) is not None:
-            return _value_resolution(payload[key])
+    result = payload.get("result")
+    if result:
+        parsed = _value_resolution(result)
+        if parsed is not None:
+            return parsed
+
+    settlement_value = payload.get("settlement_value_dollars")
+    if settlement_value is not None:
+        try:
+            settlement_float = float(settlement_value)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if 0.0 <= settlement_float <= 1.0:
+                return settlement_float
+
+    for key in ("settlement_result", "settlement_value", "expiration_value"):
+        value = payload.get(key)
+        if value is None or value == "":
+            continue
+        parsed = _value_resolution(value)
+        if parsed is not None:
+            return parsed
     return None
 
 

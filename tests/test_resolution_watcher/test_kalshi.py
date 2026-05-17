@@ -53,13 +53,42 @@ async def test_kalshi_fetches_binary_resolution() -> None:
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
-        ({"expiration_value": "Yes"}, 1.0),
-        ({"expiration_value": "No"}, 0.0),
-        ({"expiration_value": "Yes", "result": "No"}, 1.0),
+        (
+            {
+                "ticker": "KXMVECROSSCATEGORY",
+                "status": "finalized",
+                "result": "yes",
+                "expiration_value": "",
+                "settlement_value_dollars": "1.0000",
+            },
+            1.0,
+        ),
+        (
+            {
+                "ticker": "KXXRP-26MAY1709-B1.6099500",
+                "status": "finalized",
+                "result": "no",
+                "expiration_value": "1.4231",
+                "settlement_value_dollars": "0.0000",
+            },
+            0.0,
+        ),
+        (
+            {
+                "ticker": "KXEUROVISIONRANK-26TOP10-AUS",
+                "status": "finalized",
+                "expiration_value": "Yes",
+            },
+            1.0,
+        ),
+        ({"status": "active", "result": "", "expiration_value": ""}, None),
+        ({"status": "finalized", "result": "YES"}, 1.0),
+        ({"status": "finalized", "result": "", "expiration_value": "No"}, 0.0),
+        ({"status": "finalized", "settlement_value_dollars": "1.0000"}, 1.0),
     ],
 )
-def test_kalshi_resolved_value_reads_expiration_value(
+def test_kalshi_resolved_value_uses_authoritative_fields_before_expiration_value(
     payload: dict[str, str],
-    expected: float,
+    expected: float | None,
 ) -> None:
     assert _resolved_value(payload) == expected
