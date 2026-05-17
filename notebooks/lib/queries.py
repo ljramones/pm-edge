@@ -17,6 +17,13 @@ DATA_DIR_ENV = "PM_EDGE_LOCAL_FORWARD_INDEX_DIR"
 EXPECTED_TABLES = ("order_book_snapshots", "trade_events", "market_metadata_snapshots")
 
 TIMESCALE_RE = re.compile(r"^\d+\s+(minute|hour|day)s?$")
+GEOPOLITICS_PATTERN = (
+    r"\b("
+    r"iran|ukraine|russia|gaza|israel|hamas|hezbollah|ceasefire|"
+    r"nuclear|missile|airstrike|sanction|nato|taiwan|china|"
+    r"military|invasion|war"
+    r")\b|middle east"
+)
 
 
 def get_connection(data_dir: Path | None = None) -> duckdb.DuckDBPyConnection:
@@ -31,6 +38,53 @@ def get_connection(data_dir: Path | None = None) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
     _create_forward_index_views(con, root)
     return con
+
+
+def polymarket_category_expression(raw_json_sql: str = "raw_json") -> str:
+    """Return a DuckDB SQL expression for Polymarket market categories.
+
+    The expression preserves Polymarket's structured ``feeType`` categories
+    when present. Geopolitics is assigned only for otherwise uncategorized
+    markets whose text fields contain explicit foreign-policy or conflict
+    terms, so existing sports, politics, crypto, finance, and culture
+    classifications do not move.
+    """
+
+    fee_type = f"lower(coalesce(json_extract_string({raw_json_sql}, '$.feeType'), ''))"
+    normalized_fee_type = f"""
+        nullif(
+            replace(
+                replace(
+                    replace({fee_type}, '_fees_v2', ''),
+                    '_fees',
+                    ''
+                ),
+                '_prices',
+                ''
+            ),
+            ''
+        )
+    """
+    text = " || ' ' || ".join(
+        f"coalesce(json_extract_string({raw_json_sql}, '$.{field}'), '')"
+        for field in (
+            "question",
+            "title",
+            "name",
+            "description",
+            "eventTitle",
+            "event_title",
+            "groupItemTitle",
+            "slug",
+        )
+    )
+    return f"""
+        CASE
+            WHEN {normalized_fee_type} IS NOT NULL THEN {normalized_fee_type}
+            WHEN regexp_matches(lower({text}), '{GEOPOLITICS_PATTERN}') THEN 'geopolitics'
+            ELSE 'polymarket_uncategorized'
+        END
+    """
 
 
 def hourly_snapshot_volume(

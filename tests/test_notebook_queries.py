@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -234,6 +236,35 @@ def test_resolved_market_outcomes_stub(tmp_path: Path) -> None:
         "final_top_ask",
         "final_spread",
     ]
+
+
+@pytest.mark.parametrize(
+    ("raw_json", "expected"),
+    [
+        ({"feeType": "sports_fees_v2", "question": "Will Iran strike Israel?"}, "sports"),
+        ({"feeType": "politics_fees", "question": "Will Russia and Ukraine agree?"}, "politics"),
+        ({"feeType": "crypto_prices", "question": "Will Bitcoin hit 120k?"}, "crypto"),
+        ({"feeType": "culture", "question": "Will a film win best picture?"}, "culture"),
+        ({"feeType": "finance", "question": "Will CPI be above forecast?"}, "finance"),
+        ({"question": "Will Iran announce a nuclear agreement?"}, "geopolitics"),
+        ({"slug": "russia-ukraine-ceasefire-before-june"}, "geopolitics"),
+        (
+            {"groupItemTitle": "Middle East tensions", "question": "Will there be an airstrike?"},
+            "geopolitics",
+        ),
+        ({"question": "Will the movie win an award?"}, "polymarket_uncategorized"),
+    ],
+)
+def test_polymarket_category_expression(raw_json: dict[str, str], expected: str) -> None:
+    con = duckdb.connect()
+    expression = queries.polymarket_category_expression("raw_json")
+
+    result = con.execute(
+        f"SELECT {expression} AS category FROM (SELECT ? AS raw_json)",
+        [json.dumps(raw_json)],
+    ).fetchone()
+
+    assert result == (expected,)
 
 
 def write_forward_index_fixture(tmp_path: Path) -> Path:

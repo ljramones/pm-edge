@@ -435,6 +435,113 @@ One data point is not a strategy, but the ITA Top-5 case is exactly the kind of 
 
 Eurovision missed automatic resolution-watcher capture due to deploy timing artifact: v2 indexer metadata landed after markets closed. Future resolutions are captured automatically once the v2 metadata fields are present. Disappeared-market detection would have caught Eurovision; queue it as Phase 2.1 Sunday/Monday work.
 
+## Entry 15 — Phase 2 core infrastructure complete [INFRASTRUCTURE, 2026-05-16]
+
+**Components delivered**
+
+- Execution simulator v0: conservative-by-default fill simulation, validator suite, and assumption-health reporting.
+- Forward indexer metadata enrichment: v2 metadata fields `venue_status_raw`, `is_closed`, `is_archived`, `is_resolved`, `resolution_outcome`, `resolution_timestamp_utc`, and `accepting_orders`.
+- Resolution watcher v0 to v0.1: metadata-based detection plus API fallback for ambiguous outcomes.
+- Resolution outcome parquet write path with final book state join.
+- Deployment on a single 2 GB VPS with systemd memory constraints and 2 GB swap.
+
+**Production incidents and recoveries**
+
+1. OOM cascade after deploying the resolution watcher. The forward indexer was killed four times, and load average reached `11.79` on a two-core VPS. Root cause: about `1.7 GB` combined demand on a 2 GB host with no swap. Fix: stop watcher, add 2 GB swap, redeploy with memory constraints.
+2. Polymarket parser missed the `tokens[].winner` field for closed markets. Fixed by extracting the winning token and mapping YES-side wins to `1.0`, NO-side wins to `0.0`, and 50/50 outcomes to `0.5`.
+3. Resolution-watcher dedup did not persist across restarts, creating duplicate-write risk. Fixed by hydrating `seen_resolutions` from existing `resolved_market_outcomes` parquet files at startup.
+4. Final book join failed when `venue_resolved_at_utc` was null for Polymarket. Fixed by falling back to watcher detection timestamp for final-book lookup.
+
+**Lesson**
+
+Adding a second long-running service to a memory-constrained VPS without first measuring combined working set caused a 30-minute production incident. Future architectural changes validate combined memory profile before deploy, not after the service discovers the limit empirically.
+
+## Entry 16 — Phase 2.1 disappeared-market detection [INFRASTRUCTURE, 2026-05-16]
+
+**Motivation**
+
+Metadata-based resolution detection requires markets to be in the indexer's active set when v2 metadata is captured. Eurovision exposed the gap: 12 Kalshi markets settled within about 10 minutes, then disappeared from active tracking before v2 metadata existed. The watcher could not detect them from metadata fields alone.
+
+**Implementation**
+
+Second detection path in the watcher. It identifies markets that appeared in metadata within the past 24 hours but no longer appear in the most recent active set, excluding anything already in `seen_resolutions`. The watcher queries the venue API directly for each disappeared market, rate-limited to 50 calls per cycle per venue.
+
+Resolved disappeared markets are persisted through the same `resolved_market_outcomes` table as metadata-detected markets, with `resolution_source` set to the venue API source and `is_disappeared_detection=true` for traceability.
+
+**Production rollout outcomes**
+
+- `725` disappeared candidates identified across both venues on the first production cycle.
+- `41` resolutions captured in production in the first 30 minutes.
+- `31` of `38` Kalshi captures had pre-resolution book state.
+- All 12 Eurovision markets were captured with outcomes and book state where available.
+
+**Structural finding**
+
+The indexer's `volume_num_min=10000` threshold caused `ITA Top-5` to drop from active tracking at `12:31:48 UTC`, about 11 hours before the market closed. The mispricing, around `0.18` implied probability versus realized YES, existed throughout that 11-hour window, but the infrastructure lost visibility to it.
+
+**Filter-vs-edge tension**
+
+Low-volume markets are simultaneously the ones most likely to be mispriced, because fewer participants force consensus, and the ones the indexer is most likely to lose track of, because the activity filter prunes them. This is an inherent tension in filter-based active sets, not a bug. Future filtering work must treat "tradeable enough to monitor" and "liquid enough to size" as separate concepts.
+
+## Entry 17 — Eurovision 2026 production capture update [ANALYSIS, 2026-05-16]
+
+**Setup**
+
+Entry 14 captured the initial Eurovision live-resolution lesson. After Phase 2.1 disappeared-market detection was deployed, the watcher captured the resolved Kalshi Eurovision markets that had closed before v2 metadata was available.
+
+`13` Kalshi markets were observed pre-show, with informal price priors recorded around `09:50 EDT` (`13:50 UTC`). The show ended around `22:30 UTC`. Markets closed in the `23:15-23:26 UTC` window.
+
+**Captured outcomes through disappeared detection**
+
+| Market | Result | Final book state |
+|---|---:|---|
+| AUS Top-10 | YES (`1.0`) | `0.97/0.98` |
+| ISR Top-10 | YES (`1.0`) | `0.89/0.95` |
+| BUL Top-10 | YES (`1.0`) | `0.96/NULL` |
+| DEN Top-10 | YES (`1.0`) | `0.63/0.66` |
+| ITA Top-10 | YES (`1.0`) | `0.57/0.62` |
+| MOL Top-10 | YES (`1.0`) | `0.49/0.66` |
+| GRE Top-10 | YES (`1.0`) | `NULL/NULL` |
+| ALB Top-10 | NO (`0.0`) | `0.33/0.35` |
+| BUL Top-5 | YES (`1.0`) | `0.99/NULL` |
+| ISR Top-5 | YES (`1.0`) | `0.99/NULL` |
+| MOL Top-5 | NO (`0.0`) | `NULL/0.01` |
+| FRA Top-3 | NO (`0.0`) | `NULL/0.01` |
+
+**Pre-show priors recorded to results**
+
+| Market | Pre-show | Result | Return |
+|---|---:|---:|---:|
+| AUS Top-10 | `0.97` | YES | `1.03x` |
+| ISR Top-10 | `0.93` | YES | `1.07x` |
+| AUS Top-5 | `0.79` | YES | `1.27x` |
+| BUL Top-5 | `0.63` | YES | `1.59x` |
+| ITA Top-10 | `0.59` | YES | `1.69x` |
+| MOL Top-10 | `0.58` | YES | `1.72x` |
+| ITA Top-5 | `0.18` | YES | `5.5x` |
+
+A flat `$1` stake on each recorded prior price implies `$4.67` staked and `$7` returned, or `1.50x`.
+
+**Headline observation**
+
+`ITA Top-5` at `0.18-0.20` was flagged as anomalously low pre-show and resolved YES. The market underpriced Italy's chances by roughly `4-5x`.
+
+**Caveat**
+
+Seven observed priors are not a strategy. All seven favorites won, so the sample is favorable by construction. The important question is what hit rate looks like across hundreds of similarly flagged low-frequency event markets. The infrastructure now captures the data needed to answer that question forward.
+
+**Inferred Eurovision 2026 final ranking**
+
+- Top 5: ISR, ITA, BUL plus two others.
+- Top 10 additionally: AUS, MOL, DEN, GRE.
+- Not Top 10: ALB.
+- Not Top 5: MOL.
+- Not Top 3: FRA.
+
+**Next research direction**
+
+Track similar low-frequency cultural-event markets, including Oscars, sports playoffs, and single-event political markets, to test whether the apparent underpricing of established favorites in multi-outcome ranking markets generalizes.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
