@@ -446,7 +446,169 @@ def test_detect_disappeared_candidates_excludes_current_and_seen_markets(
     )
 
     assert detection.disappeared_candidates_seen == 1
+    assert detection.disappeared_skipped_as_still_active == 0
     assert [candidate.market_id for candidate in detection.candidates] == ["poly-4"]
+
+
+@pytest.mark.parametrize(
+    ("market_id", "is_closed", "accepting_orders", "end_delta"),
+    [
+        ("poly-closed", True, True, timedelta(days=30)),
+        ("poly-not-accepting", False, False, timedelta(days=30)),
+        ("poly-expiring", False, True, timedelta(hours=23)),
+    ],
+)
+def test_detect_disappeared_polymarket_candidates_keeps_terminal_signals(
+    tmp_path: Path,
+    base_time: datetime,
+    market_id: str,
+    is_closed: bool,
+    accepting_orders: bool,
+    end_delta: timedelta,
+) -> None:
+    archive = tmp_path / "forward_index"
+    row = metadata_row(
+        "polymarket",
+        market_id,
+        base_time - timedelta(hours=2),
+        base_time + end_delta,
+        "active",
+        {"conditionId": market_id},
+        is_resolved=False,
+        is_closed=is_closed,
+        resolution_outcome=None,
+    )
+    row["accepting_orders"] = accepting_orders
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / "date=2026-05-16"
+        / "part.parquet",
+        [row],
+        metadata_schema(),
+    )
+
+    detection = detect_disappeared_candidates(
+        archive,
+        venue="polymarket",
+        seen=set(),
+        now=base_time,
+    )
+
+    assert detection.disappeared_candidates_seen == 1
+    assert detection.disappeared_skipped_as_still_active == 0
+    assert [candidate.market_id for candidate in detection.candidates] == [market_id]
+
+
+def test_detect_disappeared_polymarket_skips_still_active_future_market(
+    tmp_path: Path,
+    base_time: datetime,
+) -> None:
+    archive = tmp_path / "forward_index"
+    row = metadata_row(
+        "polymarket",
+        "poly-french-open",
+        base_time - timedelta(hours=2),
+        base_time + timedelta(days=30),
+        "active",
+        {"conditionId": "poly-french-open"},
+        is_resolved=False,
+        is_closed=False,
+        resolution_outcome=None,
+    )
+    row["accepting_orders"] = True
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / "date=2026-05-16"
+        / "part.parquet",
+        [row],
+        metadata_schema(),
+    )
+
+    detection = detect_disappeared_candidates(
+        archive,
+        venue="polymarket",
+        seen=set(),
+        now=base_time,
+    )
+
+    assert detection.disappeared_candidates_seen == 0
+    assert detection.disappeared_skipped_as_still_active == 1
+    assert detection.candidates == []
+
+
+def test_detect_disappeared_kalshi_candidates_are_not_prefiltered(
+    tmp_path: Path,
+    base_time: datetime,
+) -> None:
+    archive = tmp_path / "forward_index"
+    row = metadata_row(
+        "kalshi",
+        "KTEST-ACTIVE",
+        base_time - timedelta(hours=2),
+        base_time + timedelta(days=30),
+        "active",
+        {"ticker": "KTEST-ACTIVE"},
+        is_resolved=False,
+        is_closed=False,
+        resolution_outcome=None,
+    )
+    row["accepting_orders"] = True
+    write_table(
+        archive / "market_metadata_snapshots" / "venue=kalshi" / "date=2026-05-16" / "part.parquet",
+        [row],
+        metadata_schema(),
+    )
+
+    detection = detect_disappeared_candidates(
+        archive,
+        venue="kalshi",
+        seen=set(),
+        now=base_time,
+    )
+
+    assert detection.disappeared_candidates_seen == 1
+    assert detection.disappeared_skipped_as_still_active == 0
+    assert [candidate.market_id for candidate in detection.candidates] == ["KTEST-ACTIVE"]
+
+
+def test_detect_disappeared_polymarket_old_schema_is_included(
+    tmp_path: Path,
+    base_time: datetime,
+) -> None:
+    archive = tmp_path / "forward_index"
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / "date=2026-05-16"
+        / "part.parquet",
+        [
+            old_metadata_row(
+                "polymarket",
+                "poly-old-schema",
+                base_time - timedelta(hours=2),
+                base_time + timedelta(days=30),
+                "open",
+                {"conditionId": "poly-old-schema"},
+            )
+        ],
+        old_metadata_schema(),
+    )
+
+    detection = detect_disappeared_candidates(
+        archive,
+        venue="polymarket",
+        seen=set(),
+        now=base_time,
+    )
+
+    assert detection.disappeared_candidates_seen == 1
+    assert detection.disappeared_skipped_as_still_active == 0
+    assert [candidate.market_id for candidate in detection.candidates] == ["poly-old-schema"]
 
 
 @pytest.mark.asyncio

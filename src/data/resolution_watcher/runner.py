@@ -6,7 +6,7 @@ import asyncio
 import signal
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol, TypeVar
 
@@ -68,6 +68,7 @@ class ResolutionWatcherRunner:
         self.api_fallbacks_since_heartbeat = 0
         self.disappeared_candidates_since_heartbeat = 0
         self.disappeared_resolutions_since_heartbeat = 0
+        self.disappeared_skipped_as_still_active_since_heartbeat = 0
         self._logger = get_logger(__name__)
         self._stop = asyncio.Event()
 
@@ -152,6 +153,9 @@ class ResolutionWatcherRunner:
                     new_resolutions_detected=len(candidates),
                     api_fallbacks_used=api_fallbacks_used,
                     disappeared_candidates_seen=disappeared_written.candidates_seen,
+                    disappeared_skipped_as_still_active=(
+                        disappeared_written.skipped_as_still_active
+                    ),
                     disappeared_resolutions_detected=disappeared_written.resolutions_detected,
                     markets_resolved_this_cycle=(
                         len(written) + disappeared_written.resolutions_detected
@@ -178,10 +182,14 @@ class ResolutionWatcherRunner:
             max_candidates=self.settings.disappeared_max_checks_per_cycle,
         )
         self.disappeared_candidates_since_heartbeat += detection.disappeared_candidates_seen
+        self.disappeared_skipped_as_still_active_since_heartbeat += (
+            detection.disappeared_skipped_as_still_active
+        )
         self.markets_checked_since_heartbeat += len(detection.candidates)
         if self.settings.dry_run:
             return DisappearedProcessingResult(
                 candidates_seen=detection.disappeared_candidates_seen,
+                skipped_as_still_active=detection.disappeared_skipped_as_still_active,
                 markets_checked=len(detection.candidates),
                 resolutions_detected=0,
             )
@@ -209,6 +217,7 @@ class ResolutionWatcherRunner:
             self.disappeared_resolutions_since_heartbeat += accepted
         return DisappearedProcessingResult(
             candidates_seen=detection.disappeared_candidates_seen,
+            skipped_as_still_active=detection.disappeared_skipped_as_still_active,
             markets_checked=len(detection.candidates),
             resolutions_detected=len(written),
         )
@@ -221,6 +230,9 @@ class ResolutionWatcherRunner:
             new_resolutions_detected=self.new_resolutions_since_heartbeat,
             api_fallbacks_used=self.api_fallbacks_since_heartbeat,
             disappeared_candidates_seen=self.disappeared_candidates_since_heartbeat,
+            disappeared_skipped_as_still_active=(
+                self.disappeared_skipped_as_still_active_since_heartbeat
+            ),
             disappeared_resolutions_detected=self.disappeared_resolutions_since_heartbeat,
             markets_resolved_this_cycle=self.resolved_since_heartbeat,
             total_resolved_since_start=self.total_resolved_since_start,
@@ -232,6 +244,7 @@ class ResolutionWatcherRunner:
         self.api_fallbacks_since_heartbeat = 0
         self.disappeared_candidates_since_heartbeat = 0
         self.disappeared_resolutions_since_heartbeat = 0
+        self.disappeared_skipped_as_still_active_since_heartbeat = 0
 
     async def _sleep_or_stop(self, seconds: float) -> bool:
         try:
@@ -256,12 +269,14 @@ class ResolutionDetectionResult:
 @dataclass(frozen=True)
 class DisappearedDetectionResult:
     disappeared_candidates_seen: int
+    disappeared_skipped_as_still_active: int
     candidates: list[MarketResolutionCandidate]
 
 
 @dataclass(frozen=True)
 class DisappearedProcessingResult:
     candidates_seen: int
+    skipped_as_still_active: int
     markets_checked: int
     resolutions_detected: int
 
@@ -373,7 +388,11 @@ def detect_disappeared_candidates(
 
     metadata_dir = source_dir / "market_metadata_snapshots"
     if not metadata_dir.exists() or not any(metadata_dir.rglob("*.parquet")):
-        return DisappearedDetectionResult(disappeared_candidates_seen=0, candidates=[])
+        return DisappearedDetectionResult(
+            disappeared_candidates_seen=0,
+            disappeared_skipped_as_still_active=0,
+            candidates=[],
+        )
     con = duckdb.connect()
     try:
         path = _sql_string(str(metadata_dir / "**" / "*.parquet"))
@@ -410,7 +429,8 @@ def detect_disappeared_candidates(
                 r.is_closed,
                 r.is_resolved,
                 r.resolution_outcome,
-                r.resolution_timestamp_text
+                r.resolution_timestamp_text,
+                r.accepting_orders
             FROM latest_recent r
             LEFT JOIN currently_active a
               ON r.venue = a.venue
@@ -423,11 +443,18 @@ def detect_disappeared_candidates(
         ).fetchall()
     finally:
         con.close()
-    candidates = [
-        _candidate_from_row(row) for row in rows if (str(row[0]), str(row[1])) not in seen
-    ]
+    candidates = []
+    skipped_as_still_active = 0
+    for row in rows:
+        if (str(row[0]), str(row[1])) in seen:
+            continue
+        if _is_skippable_polymarket_disappearance(row, now=now, columns=columns):
+            skipped_as_still_active += 1
+            continue
+        candidates.append(_candidate_from_row(row))
     return DisappearedDetectionResult(
         disappeared_candidates_seen=len(candidates),
+        disappeared_skipped_as_still_active=skipped_as_still_active,
         candidates=candidates[:max_candidates],
     )
 
@@ -497,6 +524,7 @@ def _metadata_candidate_select(columns: set[str]) -> str:
                 "TIMESTAMPTZ",
                 stringify=True,
             ),
+            _nullable_select(columns, "accepting_orders", "accepting_orders", "BOOLEAN"),
         ]
     )
 
@@ -530,6 +558,31 @@ def _candidate_from_row(row: tuple[object, ...]) -> MarketResolutionCandidate:
         resolution_outcome=None if row[9] is None else str(row[9]),
         resolution_timestamp_utc=None if row[10] is None else _parse_datetime(row[10]),
     )
+
+
+def _is_skippable_polymarket_disappearance(
+    row: tuple[object, ...],
+    *,
+    now: datetime,
+    columns: set[str],
+) -> bool:
+    """Return whether a Polymarket disappearance is likely just an active-market volume dip."""
+
+    if str(row[0]) != "polymarket":
+        return False
+    required_columns = {"is_closed", "accepting_orders", "end_date"}
+    if not required_columns.issubset(columns):
+        return False
+    is_closed = row[7]
+    accepting_orders = row[11] if len(row) > 11 else None
+    end_date = None if row[3] is None else _parse_datetime(row[3])
+    if is_closed is True:
+        return False
+    if accepting_orders is False:
+        return False
+    if end_date is not None and end_date <= _to_utc(now) + timedelta(hours=24):
+        return False
+    return not (is_closed is None and accepting_orders is None and end_date is None)
 
 
 def load_seen_resolutions(output_dir: Path) -> set[tuple[str, str]]:
