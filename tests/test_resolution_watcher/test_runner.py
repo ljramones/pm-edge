@@ -107,6 +107,51 @@ class ApiResolvedClient(FakeClient):
         )
 
 
+class ControlledApiClient(FakeClient):
+    def __init__(
+        self,
+        *,
+        fail_market_ids: set[str] | None = None,
+        sleep_seconds: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.fail_market_ids = fail_market_ids or set()
+        self.sleep_seconds = sleep_seconds
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def fetch_resolution_outcome(
+        self,
+        candidate: MarketResolutionCandidate,
+        *,
+        detected_at: datetime,
+        final_snapshot: FinalBookSnapshot,
+    ) -> ResolvedMarketOutcome | None:
+        self.fetch_count += 1
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if self.sleep_seconds:
+                await asyncio.sleep(self.sleep_seconds)
+            if candidate.market_id in self.fail_market_ids:
+                raise RuntimeError(f"failed {candidate.market_id}")
+            return ResolvedMarketOutcome(
+                venue=candidate.venue,
+                market_id=candidate.market_id,
+                resolution_timestamp_utc=detected_at,
+                venue_resolved_at_utc=None,
+                resolved_value=1.0,
+                resolution_source=f"{candidate.venue}_api",
+                final_top_bid=final_snapshot.top_bid,
+                final_top_ask=final_snapshot.top_ask,
+                final_spread=final_snapshot.spread,
+                final_snapshot_timestamp_utc=final_snapshot.timestamp_utc,
+                metadata_snapshot_id=candidate.metadata_snapshot_id,
+            )
+        finally:
+            self.in_flight -= 1
+
+
 class StopAfterOneCycleRunner(ResolutionWatcherRunner):
     async def run_once(self) -> None:
         await super().run_once()
@@ -121,6 +166,44 @@ class StopImmediatelyRunner(ResolutionWatcherRunner):
 class RaisingRunner(ResolutionWatcherRunner):
     async def run_once(self) -> None:
         raise RuntimeError("cycle failed")
+
+
+def write_disappeared_polymarket_rows(
+    archive: Path,
+    *,
+    now: datetime,
+    count: int,
+) -> None:
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / f"date={now.date().isoformat()}"
+        / "part.parquet",
+        [
+            metadata_row(
+                "polymarket",
+                f"poly-disappeared-{index}",
+                now - timedelta(hours=1, seconds=index),
+                now + timedelta(hours=1),
+                "active",
+                {"conditionId": f"poly-disappeared-{index}"},
+                is_resolved=False,
+                is_closed=False,
+                resolution_outcome=None,
+            )
+            for index in range(count)
+        ],
+        metadata_schema(),
+    )
+
+
+def resolved_market_ids(output_dir: Path) -> list[str]:
+    return sorted(
+        row["market_id"]
+        for path in output_dir.glob("venue=polymarket/date=*/*.parquet")
+        for row in pq.ParquetFile(path).read().to_pylist()
+    )
 
 
 @pytest.mark.asyncio
@@ -802,28 +885,7 @@ async def test_runner_skips_disappeared_market_when_api_reports_unresolved(tmp_p
 async def test_runner_limits_disappeared_api_checks(tmp_path: Path) -> None:
     now = datetime.now(tz=UTC)
     archive = tmp_path / "forward_index"
-    write_table(
-        archive
-        / "market_metadata_snapshots"
-        / "venue=polymarket"
-        / f"date={now.date().isoformat()}"
-        / "part.parquet",
-        [
-            metadata_row(
-                "polymarket",
-                f"poly-disappeared-{index}",
-                now - timedelta(hours=1, seconds=index),
-                now + timedelta(hours=1),
-                "active",
-                {"conditionId": f"poly-disappeared-{index}"},
-                is_resolved=False,
-                is_closed=False,
-                resolution_outcome=None,
-            )
-            for index in range(50)
-        ],
-        metadata_schema(),
-    )
+    write_disappeared_polymarket_rows(archive, now=now, count=50)
     settings = ResolutionWatcherSettings(
         source_dir=archive,
         output_dir=tmp_path / "resolved",
@@ -837,6 +899,90 @@ async def test_runner_limits_disappeared_api_checks(tmp_path: Path) -> None:
 
     assert runner.disappeared_candidates_since_heartbeat == 50
     assert client.fetch_count == 20
+
+
+@pytest.mark.asyncio
+async def test_runner_disappeared_batch_matches_sequential_results(tmp_path: Path) -> None:
+    now = datetime.now(tz=UTC)
+    sequential_archive = tmp_path / "sequential" / "forward_index"
+    concurrent_archive = tmp_path / "concurrent" / "forward_index"
+    write_disappeared_polymarket_rows(sequential_archive, now=now, count=3)
+    write_disappeared_polymarket_rows(concurrent_archive, now=now, count=3)
+    sequential_output = tmp_path / "sequential" / "resolved"
+    concurrent_output = tmp_path / "concurrent" / "resolved"
+
+    sequential_runner = ResolutionWatcherRunner(
+        settings=ResolutionWatcherSettings(
+            source_dir=sequential_archive,
+            output_dir=sequential_output,
+            venues_enabled=["polymarket"],
+            api_concurrency_limit=1,
+        ),
+        clients={"polymarket": ControlledApiClient()},
+    )
+    concurrent_runner = ResolutionWatcherRunner(
+        settings=ResolutionWatcherSettings(
+            source_dir=concurrent_archive,
+            output_dir=concurrent_output,
+            venues_enabled=["polymarket"],
+            api_concurrency_limit=3,
+        ),
+        clients={"polymarket": ControlledApiClient()},
+    )
+
+    await sequential_runner.run_once()
+    await concurrent_runner.run_once()
+
+    assert resolved_market_ids(sequential_output) == resolved_market_ids(concurrent_output)
+    assert sequential_runner.total_resolved_since_start == 3
+    assert concurrent_runner.total_resolved_since_start == 3
+
+
+@pytest.mark.asyncio
+async def test_runner_disappeared_batch_caps_api_concurrency(tmp_path: Path) -> None:
+    now = datetime.now(tz=UTC)
+    archive = tmp_path / "forward_index"
+    write_disappeared_polymarket_rows(archive, now=now, count=6)
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+        api_concurrency_limit=2,
+    )
+    client = ControlledApiClient(sleep_seconds=0.01)
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.run_once()
+
+    assert client.fetch_count == 6
+    assert client.max_in_flight == 2
+    assert runner.total_resolved_since_start == 6
+
+
+@pytest.mark.asyncio
+async def test_runner_disappeared_batch_continues_after_candidate_exception(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(tz=UTC)
+    archive = tmp_path / "forward_index"
+    write_disappeared_polymarket_rows(archive, now=now, count=3)
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+        api_concurrency_limit=3,
+    )
+    client = ControlledApiClient(fail_market_ids={"poly-disappeared-1"})
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.run_once()
+
+    assert client.fetch_count == 3
+    assert runner.total_resolved_since_start == 2
+    assert resolved_market_ids(tmp_path / "resolved") == [
+        "poly-disappeared-0",
+        "poly-disappeared-2",
+    ]
 
 
 @pytest.mark.asyncio
@@ -904,6 +1050,16 @@ async def test_runner_loads_seen_resolutions_on_startup(
 
 def test_load_seen_resolutions_handles_missing_output_dir(tmp_path: Path) -> None:
     assert load_seen_resolutions(tmp_path / "missing") == set()
+
+
+def test_resolution_watcher_settings_reads_global_api_concurrency_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PM_EDGE_API_CONCURRENCY_LIMIT", "20")
+
+    settings = ResolutionWatcherSettings()
+
+    assert settings.api_concurrency_limit == 20
 
 
 @pytest.mark.asyncio

@@ -116,32 +116,27 @@ class ResolutionWatcherRunner:
                 self.markets_checked_since_heartbeat += len(candidates)
                 written: list[ResolvedMarketOutcome] = []
                 api_fallbacks_used = 0
-                for candidate in candidates:
-                    snapshot_anchor = candidate.resolution_timestamp_utc or detected_at
-                    final_snapshot = find_final_book_snapshot(
-                        self.settings.source_dir,
-                        venue=venue,
-                        market_id=candidate.market_id,
-                        before=snapshot_anchor,
-                    )
-                    if self.settings.dry_run:
+                results = await self._process_resolution_candidates(
+                    venue=venue,
+                    client=client,
+                    candidates=candidates,
+                    detected_at=detected_at,
+                )
+                for candidate, result in zip(candidates, results, strict=True):
+                    if isinstance(result, BaseException):
+                        self._logger.error(
+                            "resolution_watcher_candidate_error",
+                            venue=venue,
+                            market_id=candidate.market_id,
+                            error=str(result),
+                        )
                         continue
-                    outcome = _outcome_from_metadata(
-                        candidate,
-                        detected_at=detected_at,
-                        final_snapshot=final_snapshot,
-                    )
-                    if outcome is None:
+                    if result.api_fallback_used:
                         api_fallbacks_used += 1
                         self.api_fallbacks_since_heartbeat += 1
-                        outcome = await client.fetch_resolution_outcome(
-                            candidate,
-                            detected_at=detected_at,
-                            final_snapshot=final_snapshot,
-                        )
-                    if outcome is None:
+                    if result.outcome is None:
                         continue
-                    written.append(outcome)
+                    written.append(result.outcome)
                     self.seen_resolutions.add((venue, candidate.market_id))
                 if written:
                     accepted = await self.writer.write(written)
@@ -173,6 +168,125 @@ class ResolutionWatcherRunner:
             except Exception:
                 self._logger.exception("resolution_watcher_venue_error", venue=venue)
 
+    async def _process_resolution_candidates(
+        self,
+        *,
+        venue: str,
+        client: ResolutionClient,
+        candidates: list[MarketResolutionCandidate],
+        detected_at: datetime,
+    ) -> list[CandidateProcessingResult | BaseException]:
+        semaphore = asyncio.Semaphore(self.settings.api_concurrency_limit)
+
+        async def process_with_limit(
+            candidate: MarketResolutionCandidate,
+        ) -> CandidateProcessingResult:
+            snapshot_anchor = candidate.resolution_timestamp_utc or detected_at
+            final_snapshot = find_final_book_snapshot(
+                self.settings.source_dir,
+                venue=venue,
+                market_id=candidate.market_id,
+                before=snapshot_anchor,
+            )
+            if self.settings.dry_run:
+                return CandidateProcessingResult(outcome=None)
+            outcome = _outcome_from_metadata(
+                candidate,
+                detected_at=detected_at,
+                final_snapshot=final_snapshot,
+            )
+            if outcome is not None:
+                return CandidateProcessingResult(outcome=outcome)
+            async with semaphore:
+                outcome = await client.fetch_resolution_outcome(
+                    candidate,
+                    detected_at=detected_at,
+                    final_snapshot=final_snapshot,
+                )
+            return CandidateProcessingResult(outcome=outcome, api_fallback_used=True)
+
+        try:
+            return await asyncio.gather(
+                *(process_with_limit(candidate) for candidate in candidates),
+                return_exceptions=True,
+            )
+        except Exception:
+            self._logger.exception(
+                "resolution_watcher_batch_error_falling_back_to_sequential",
+                venue=venue,
+            )
+            results: list[CandidateProcessingResult | BaseException] = []
+            for candidate in candidates:
+                try:
+                    results.append(await process_with_limit(candidate))
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    results.append(exc)
+            return results
+
+    async def _process_disappeared_candidate(
+        self,
+        *,
+        venue: str,
+        client: ResolutionClient,
+        candidate: MarketResolutionCandidate,
+        detected_at: datetime,
+        semaphore: asyncio.Semaphore,
+    ) -> ResolvedMarketOutcome | None:
+        final_snapshot = find_final_book_snapshot(
+            self.settings.source_dir,
+            venue=venue,
+            market_id=candidate.market_id,
+            before=detected_at,
+        )
+        async with semaphore:
+            outcome = await client.fetch_resolution_outcome(
+                candidate,
+                detected_at=detected_at,
+                final_snapshot=final_snapshot,
+            )
+        if outcome is None:
+            return None
+        return replace(outcome, is_disappeared_detection=True)
+
+    async def _process_disappeared_candidate_batch(
+        self,
+        *,
+        venue: str,
+        client: ResolutionClient,
+        candidates: list[MarketResolutionCandidate],
+        detected_at: datetime,
+    ) -> list[ResolvedMarketOutcome | None | BaseException]:
+        semaphore = asyncio.Semaphore(self.settings.api_concurrency_limit)
+
+        async def process_with_limit(
+            candidate: MarketResolutionCandidate,
+        ) -> ResolvedMarketOutcome | None:
+            return await self._process_disappeared_candidate(
+                venue=venue,
+                client=client,
+                candidate=candidate,
+                detected_at=detected_at,
+                semaphore=semaphore,
+            )
+
+        try:
+            return await asyncio.gather(
+                *(process_with_limit(candidate) for candidate in candidates),
+                return_exceptions=True,
+            )
+        except Exception:
+            self._logger.exception(
+                "resolution_watcher_disappeared_batch_error_falling_back_to_sequential",
+                venue=venue,
+            )
+            results: list[ResolvedMarketOutcome | None | BaseException] = []
+            for candidate in candidates:
+                try:
+                    results.append(await process_with_limit(candidate))
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    results.append(exc)
+            return results
+
     async def _process_disappeared_candidates(
         self,
         *,
@@ -201,21 +315,24 @@ class ResolutionWatcherRunner:
                 resolutions_detected=0,
             )
         written: list[ResolvedMarketOutcome] = []
-        for candidate in detection.candidates:
-            final_snapshot = find_final_book_snapshot(
-                self.settings.source_dir,
-                venue=venue,
-                market_id=candidate.market_id,
-                before=detected_at,
-            )
-            outcome = await client.fetch_resolution_outcome(
-                candidate,
-                detected_at=detected_at,
-                final_snapshot=final_snapshot,
-            )
-            if outcome is None:
+        results = await self._process_disappeared_candidate_batch(
+            venue=venue,
+            client=client,
+            candidates=detection.candidates,
+            detected_at=detected_at,
+        )
+        for candidate, result in zip(detection.candidates, results, strict=True):
+            if isinstance(result, BaseException):
+                self._logger.error(
+                    "resolution_watcher_disappeared_candidate_error",
+                    venue=venue,
+                    market_id=candidate.market_id,
+                    error=str(result),
+                )
                 continue
-            written.append(replace(outcome, is_disappeared_detection=True))
+            if result is None:
+                continue
+            written.append(result)
             self.seen_resolutions.add((venue, candidate.market_id))
         if written:
             accepted = await self.writer.write(written)
@@ -286,6 +403,12 @@ class DisappearedProcessingResult:
     skipped_as_still_active: int
     markets_checked: int
     resolutions_detected: int
+
+
+@dataclass(frozen=True)
+class CandidateProcessingResult:
+    outcome: ResolvedMarketOutcome | None
+    api_fallback_used: bool = False
 
 
 def detect_resolution_candidates(

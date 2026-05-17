@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,7 @@ class ResolutionWatcherSettings(BaseSettings):
         env_file_encoding="utf-8",
         env_prefix="PM_EDGE_RESOLUTION_WATCHER_",
         extra="ignore",
+        populate_by_name=True,
     )
 
     source_dir: Path = Path("data/raw/forward_index")
@@ -30,4 +31,12 @@ class ResolutionWatcherSettings(BaseSettings):
     metadata_lookback_days: int = Field(default=7, ge=1)
     disappeared_lookback_hours: int = Field(default=24, ge=1)
     disappeared_max_checks_per_cycle: int = Field(default=50, ge=1)
+    api_concurrency_limit: int = Field(
+        default=10,
+        ge=1,
+        validation_alias=AliasChoices(
+            "PM_EDGE_API_CONCURRENCY_LIMIT",
+            "PM_EDGE_RESOLUTION_WATCHER_API_CONCURRENCY_LIMIT",
+        ),
+    )
     dry_run: bool = False
