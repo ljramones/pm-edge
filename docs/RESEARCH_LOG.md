@@ -542,6 +542,47 @@ Seven observed priors are not a strategy. All seven favorites won, so the sample
 
 Track similar low-frequency cultural-event markets, including Oscars, sports playoffs, and single-event political markets, to test whether the apparent underpricing of established favorites in multi-outcome ranking markets generalizes.
 
+## Entry 18 — Volume filter mechanism investigation [INFRASTRUCTURE, 2026-05-16]
+
+**Confirmed mechanism**
+
+Post-deploy investigation following the Eurovision capture confirmed that the `volume_num_min=10000` threshold that dropped `ITA Top-5` is shared between venues through the runner's `ActivityThresholds`, not specific to either Polymarket or Kalshi.
+
+- Polymarket: filter applied server-side via the `volume_num_min` Gamma API query parameter in `src/data/forward_indexer/polymarket.py`.
+- Kalshi: filter applied client-side post-fetch in the shared runner via `min_24h_volume_usd` in `src/data/forward_indexer/filters.py`.
+- Both are sourced from `src/core/config.py` through the `PM_EDGE_FORWARD_INDEXER_MIN_24H_VOLUME_USD` environment variable.
+- Default: `$10,000` USD 24h rolling volume.
+- Tunable without code changes via `.env` plus forward-indexer restart.
+
+**Why not adjust tonight**
+
+The 2 GB VPS is currently within budget but still constrained. Current observed indexer working set is about `455-664 MB`, with peak around `1.1 GB` and `761 MB` swap in use. Lowering the threshold to `$5k` likely grows the active set by `1.5-2x`; lowering to `$1k` could grow it by `3-5x`.
+
+Without an empirical memory profile at each setting, changing the threshold carries OOM-recurrence risk that does not justify the upside tonight. Phase 2.1 disappeared-market detection already captures resolutions retroactively. The remaining gap is mid-trade book history for thin markets, which is valuable but not urgent enough to risk production stability after the day's earlier memory incident.
+
+**Recommended Phase 3 design**
+
+Implement a metadata-only watch list for markets that drop below the activity threshold.
+
+- When a previously active market falls below `min_24h_volume_usd`, transition it from full subscription to metadata-only state.
+- Continue periodic metadata snapshots, every 5-10 minutes, for up to N days after drop or until market resolution.
+- Do not maintain order book WebSocket subscription for watch-list markets, keeping memory cost minimal.
+- Capture resolution status changes and mid-trade metadata evolution without the memory cost of full book tracking.
+
+**Acceptance criteria for Phase 3**
+
+- Markets that drop below threshold during their lifetime are captured at every state transition.
+- Memory overhead stays under `+20%` even with `2-3x` more markets in the watch list than in the active set.
+- Disappeared-market detection becomes a backstop rather than the primary capture mechanism for thin markets.
+
+**Production state at end of session**
+
+- Forward indexer: stable, about `455 MB` current, `1.1 GB` peak, `761 MB` swap.
+- Resolution watcher: `48` resolutions captured, `38` Kalshi plus `10` Polymarket, with at least `31` carrying book state.
+- 12 Eurovision markets captured complete.
+- Backlog of about `664` disappeared markets draining at decreasing hit rate; priority ordering has already processed the most likely settled candidates.
+- Both services are within memory budgets, swap usage is healthy, and the system is running unattended-stable.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
