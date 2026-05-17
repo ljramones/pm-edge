@@ -85,7 +85,7 @@ class KalshiResolutionClient:
 
 
 def _resolved_value(payload: dict[str, Any]) -> float | None:
-    for key in ("result", "settlement_result", "settlement_value"):
+    for key in ("expiration_value", "result", "settlement_result", "settlement_value"):
         if payload.get(key) is not None:
             return _value_resolution(payload[key])
     return None

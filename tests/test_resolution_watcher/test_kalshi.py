@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from data.resolution_watcher.kalshi import KalshiResolutionClient
+from data.resolution_watcher.kalshi import KalshiResolutionClient, _resolved_value
 from data.resolution_watcher.schema import FinalBookSnapshot, MarketResolutionCandidate
 
 
@@ -48,3 +48,18 @@ async def test_kalshi_fetches_binary_resolution() -> None:
     assert outcome.resolution_source == "kalshi_api"
     assert outcome.final_top_ask == 0.01
     await client.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"expiration_value": "Yes"}, 1.0),
+        ({"expiration_value": "No"}, 0.0),
+        ({"expiration_value": "Yes", "result": "No"}, 1.0),
+    ],
+)
+def test_kalshi_resolved_value_reads_expiration_value(
+    payload: dict[str, str],
+    expected: float,
+) -> None:
+    assert _resolved_value(payload) == expected
