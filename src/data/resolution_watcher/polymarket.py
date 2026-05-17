@@ -85,6 +85,9 @@ class PolymarketResolutionClient:
 
 
 def _resolved_value(payload: dict[str, Any]) -> float | None:
+    token_resolution = _token_winner_resolution(payload)
+    if token_resolution is not None:
+        return token_resolution
     for key in ("resolvedValue", "resolutionValue", "settlementValue"):
         if payload.get(key) is not None:
             return _numeric_resolution(payload[key])
@@ -102,6 +105,24 @@ def _resolved_value(payload: dict[str, Any]) -> float | None:
         if first == 0.0 and second == 1.0:
             return 0.0
     return None
+
+
+def _token_winner_resolution(payload: dict[str, Any]) -> float | None:
+    if payload.get("closed") is not True:
+        return None
+    if payload.get("is_50_50_outcome") is True:
+        return 0.5
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, list):
+        return None
+    winners = [
+        index
+        for index, token in enumerate(tokens)
+        if isinstance(token, dict) and token.get("winner") is True
+    ]
+    if len(winners) != 1:
+        return None
+    return 1.0 if winners[0] == 0 else 0.0
 
 
 def _numeric_resolution(value: Any) -> float | None:
