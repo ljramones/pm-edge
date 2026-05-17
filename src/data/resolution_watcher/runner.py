@@ -248,7 +248,7 @@ def detect_resolution_candidates(
             WHERE rn = 1
               AND (
                 is_resolved = true
-                OR (is_closed = true AND resolution_outcome IS NOT NULL)
+                OR is_closed = true
               )
             """,
             [venue, lower_bound],

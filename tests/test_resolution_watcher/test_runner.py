@@ -102,7 +102,7 @@ async def test_runner_run_once_processes_detected_resolution(
 
 
 @pytest.mark.asyncio
-async def test_runner_uses_api_fallback_for_ambiguous_resolution(
+async def test_runner_uses_api_fallback_for_closed_unresolved_market(
     tmp_path: Path,
     base_time: datetime,
 ) -> None:
@@ -121,7 +121,7 @@ async def test_runner_uses_api_fallback_for_ambiguous_resolution(
                 base_time - timedelta(hours=1),
                 "closed",
                 {"conditionId": "poly-ambiguous"},
-                is_resolved=True,
+                is_resolved=False,
                 is_closed=True,
                 resolution_outcome=None,
             )
