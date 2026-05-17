@@ -28,4 +28,6 @@ class ResolutionWatcherSettings(BaseSettings):
     retry_attempts: int = Field(default=3, ge=1)
     heartbeat_interval_seconds: int = Field(default=60, ge=1)
     metadata_lookback_days: int = Field(default=7, ge=1)
+    disappeared_lookback_hours: int = Field(default=24, ge=1)
+    disappeared_max_checks_per_cycle: int = Field(default=20, ge=1)
     dry_run: bool = False

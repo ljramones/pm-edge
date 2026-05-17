@@ -9,7 +9,7 @@ from typing import Any
 
 import pyarrow as pa
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,7 @@ class ResolvedMarketOutcome:
     final_spread: float | None
     final_snapshot_timestamp_utc: datetime | None
     metadata_snapshot_id: str | None
+    is_disappeared_detection: bool = False
     schema_version: int = SCHEMA_VERSION
 
     def to_record(self) -> dict[str, Any]:
@@ -89,6 +90,7 @@ class ResolvedMarketOutcome:
                 else _to_utc(self.final_snapshot_timestamp_utc)
             ),
             "metadata_snapshot_id": self.metadata_snapshot_id,
+            "is_disappeared_detection": self.is_disappeared_detection,
         }
 
     @classmethod
@@ -117,6 +119,7 @@ class ResolvedMarketOutcome:
                 if record.get("metadata_snapshot_id") is None
                 else str(record["metadata_snapshot_id"])
             ),
+            is_disappeared_detection=bool(record.get("is_disappeared_detection", False)),
             schema_version=int(record.get("schema_version", SCHEMA_VERSION)),
         )
 
@@ -138,6 +141,7 @@ def resolved_market_outcome_schema() -> pa.Schema:
             ("final_spread", pa.float64()),
             ("final_snapshot_timestamp_utc", pa.timestamp("us", tz="UTC")),
             ("metadata_snapshot_id", pa.string()),
+            ("is_disappeared_detection", pa.bool_()),
         ]
     )
 

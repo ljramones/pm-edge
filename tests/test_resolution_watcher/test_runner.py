@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -8,6 +8,7 @@ import pytest
 
 from data.resolution_watcher.runner import (
     ResolutionWatcherRunner,
+    detect_disappeared_candidates,
     detect_resolution_candidates,
     find_final_book_snapshot,
     load_seen_resolutions,
@@ -71,6 +72,37 @@ class FailingClient(FakeClient):
         final_snapshot: FinalBookSnapshot,
     ) -> ResolvedMarketOutcome | None:
         raise RuntimeError("venue failed")
+
+
+class ApiResolvedClient(FakeClient):
+    def __init__(self, *, venue: str = "polymarket", resolved: bool = True) -> None:
+        super().__init__()
+        self.venue = venue
+        self.resolved = resolved
+
+    async def fetch_resolution_outcome(
+        self,
+        candidate: MarketResolutionCandidate,
+        *,
+        detected_at: datetime,
+        final_snapshot: FinalBookSnapshot,
+    ) -> ResolvedMarketOutcome | None:
+        self.fetch_count += 1
+        if not self.resolved:
+            return None
+        return ResolvedMarketOutcome(
+            venue=candidate.venue,
+            market_id=candidate.market_id,
+            resolution_timestamp_utc=detected_at,
+            venue_resolved_at_utc=None,
+            resolved_value=1.0,
+            resolution_source=f"{candidate.venue}_api",
+            final_top_bid=final_snapshot.top_bid,
+            final_top_ask=final_snapshot.top_ask,
+            final_spread=final_snapshot.spread,
+            final_snapshot_timestamp_utc=final_snapshot.timestamp_utc,
+            metadata_snapshot_id=candidate.metadata_snapshot_id,
+        )
 
 
 class StopAfterOneCycleRunner(ResolutionWatcherRunner):
@@ -361,6 +393,239 @@ def test_detect_resolution_candidates_limits_to_recent_metadata(
 
     assert detection.metadata_candidates_seen == 0
     assert detection.candidates == []
+
+
+def test_detect_disappeared_candidates_excludes_current_and_seen_markets(
+    tmp_path: Path,
+    base_time: datetime,
+) -> None:
+    archive = tmp_path / "forward_index"
+    rows = [
+        metadata_row(
+            "polymarket",
+            f"poly-{index}",
+            base_time - timedelta(hours=2),
+            base_time + timedelta(hours=1),
+            "active",
+            {"conditionId": f"poly-{index}"},
+            is_resolved=False,
+            is_closed=False,
+            resolution_outcome=None,
+        )
+        for index in range(5)
+    ]
+    rows.extend(
+        metadata_row(
+            "polymarket",
+            f"poly-{index}",
+            base_time - timedelta(minutes=5),
+            base_time + timedelta(hours=1),
+            "active",
+            {"conditionId": f"poly-{index}"},
+            is_resolved=False,
+            is_closed=False,
+            resolution_outcome=None,
+        )
+        for index in range(3)
+    )
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / "date=2026-05-16"
+        / "part.parquet",
+        rows,
+        metadata_schema(),
+    )
+
+    detection = detect_disappeared_candidates(
+        archive,
+        venue="polymarket",
+        seen={("polymarket", "poly-3")},
+        now=base_time,
+    )
+
+    assert detection.disappeared_candidates_seen == 1
+    assert [candidate.market_id for candidate in detection.candidates] == ["poly-4"]
+
+
+@pytest.mark.asyncio
+async def test_runner_writes_disappeared_resolution_from_api(tmp_path: Path) -> None:
+    now = datetime.now(tz=UTC)
+    archive = tmp_path / "forward_index"
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / f"date={now.date().isoformat()}"
+        / "part.parquet",
+        [
+            metadata_row(
+                "polymarket",
+                "poly-disappeared",
+                now - timedelta(hours=1),
+                now + timedelta(hours=1),
+                "active",
+                {"conditionId": "poly-disappeared"},
+                is_resolved=False,
+                is_closed=False,
+                resolution_outcome=None,
+            )
+        ],
+        metadata_schema(),
+    )
+    write_table(
+        archive
+        / "order_book_snapshots"
+        / "venue=polymarket"
+        / f"date={now.date().isoformat()}"
+        / "part.parquet",
+        [snapshot_row("polymarket", "poly-disappeared", now - timedelta(minutes=10))],
+        snapshot_schema(),
+    )
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    client = ApiResolvedClient()
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.run_once()
+
+    rows = [
+        row
+        for path in (tmp_path / "resolved").glob("venue=polymarket/date=*/*.parquet")
+        for row in pq.ParquetFile(path).read().to_pylist()
+    ]
+    assert client.fetch_count == 1
+    assert len(rows) == 1
+    assert rows[0]["market_id"] == "poly-disappeared"
+    assert rows[0]["resolution_source"] == "polymarket_api"
+    assert rows[0]["is_disappeared_detection"] is True
+    assert runner.disappeared_candidates_since_heartbeat == 1
+    assert runner.disappeared_resolutions_since_heartbeat == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_skips_disappeared_market_when_api_reports_unresolved(tmp_path: Path) -> None:
+    now = datetime.now(tz=UTC)
+    archive = tmp_path / "forward_index"
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / f"date={now.date().isoformat()}"
+        / "part.parquet",
+        [
+            metadata_row(
+                "polymarket",
+                "poly-gap",
+                now - timedelta(hours=1),
+                now + timedelta(hours=1),
+                "active",
+                {"conditionId": "poly-gap"},
+                is_resolved=False,
+                is_closed=False,
+                resolution_outcome=None,
+            )
+        ],
+        metadata_schema(),
+    )
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    client = ApiResolvedClient(resolved=False)
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.run_once()
+
+    assert client.fetch_count == 1
+    assert runner.total_resolved_since_start == 0
+    assert not list((tmp_path / "resolved").glob("venue=polymarket/date=*/*.parquet"))
+
+
+@pytest.mark.asyncio
+async def test_runner_limits_disappeared_api_checks(tmp_path: Path) -> None:
+    now = datetime.now(tz=UTC)
+    archive = tmp_path / "forward_index"
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / f"date={now.date().isoformat()}"
+        / "part.parquet",
+        [
+            metadata_row(
+                "polymarket",
+                f"poly-disappeared-{index}",
+                now - timedelta(hours=1, seconds=index),
+                now + timedelta(hours=1),
+                "active",
+                {"conditionId": f"poly-disappeared-{index}"},
+                is_resolved=False,
+                is_closed=False,
+                resolution_outcome=None,
+            )
+            for index in range(50)
+        ],
+        metadata_schema(),
+    )
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+        disappeared_max_checks_per_cycle=20,
+    )
+    client = ApiResolvedClient(resolved=False)
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.run_once()
+
+    assert runner.disappeared_candidates_since_heartbeat == 50
+    assert client.fetch_count == 20
+
+
+@pytest.mark.asyncio
+async def test_runner_deduplicates_disappeared_resolution_next_cycle(tmp_path: Path) -> None:
+    now = datetime.now(tz=UTC)
+    archive = tmp_path / "forward_index"
+    write_table(
+        archive
+        / "market_metadata_snapshots"
+        / "venue=polymarket"
+        / f"date={now.date().isoformat()}"
+        / "part.parquet",
+        [
+            metadata_row(
+                "polymarket",
+                "poly-once",
+                now - timedelta(hours=1),
+                now + timedelta(hours=1),
+                "active",
+                {"conditionId": "poly-once"},
+                is_resolved=False,
+                is_closed=False,
+                resolution_outcome=None,
+            )
+        ],
+        metadata_schema(),
+    )
+    settings = ResolutionWatcherSettings(
+        source_dir=archive,
+        output_dir=tmp_path / "resolved",
+        venues_enabled=["polymarket"],
+    )
+    client = ApiResolvedClient()
+    runner = ResolutionWatcherRunner(settings=settings, clients={"polymarket": client})
+
+    await runner.run_once()
+    await runner.run_once()
+
+    assert client.fetch_count == 1
+    assert runner.total_resolved_since_start == 1
 
 
 @pytest.mark.asyncio

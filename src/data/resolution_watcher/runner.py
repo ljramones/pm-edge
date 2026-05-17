@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import signal
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -66,6 +66,8 @@ class ResolutionWatcherRunner:
         self.metadata_candidates_since_heartbeat = 0
         self.new_resolutions_since_heartbeat = 0
         self.api_fallbacks_since_heartbeat = 0
+        self.disappeared_candidates_since_heartbeat = 0
+        self.disappeared_resolutions_since_heartbeat = 0
         self._logger = get_logger(__name__)
         self._stop = asyncio.Event()
 
@@ -137,19 +139,79 @@ class ResolutionWatcherRunner:
                     accepted = await self.writer.write(written)
                     self.total_resolved_since_start += accepted
                     self.resolved_since_heartbeat += accepted
+                disappeared_written = await self._process_disappeared_candidates(
+                    venue=venue,
+                    client=client,
+                    detected_at=detected_at,
+                )
                 self._logger.info(
                     "resolution_watcher_cycle",
                     venue=venue,
-                    markets_checked=len(candidates),
+                    markets_checked=len(candidates) + disappeared_written.markets_checked,
                     metadata_candidates_seen=detection.metadata_candidates_seen,
                     new_resolutions_detected=len(candidates),
                     api_fallbacks_used=api_fallbacks_used,
-                    markets_resolved_this_cycle=len(written),
+                    disappeared_candidates_seen=disappeared_written.candidates_seen,
+                    disappeared_resolutions_detected=disappeared_written.resolutions_detected,
+                    markets_resolved_this_cycle=(
+                        len(written) + disappeared_written.resolutions_detected
+                    ),
                     total_resolved_since_start=self.total_resolved_since_start,
                     dry_run=self.settings.dry_run,
                 )
             except Exception:
                 self._logger.exception("resolution_watcher_venue_error", venue=venue)
+
+    async def _process_disappeared_candidates(
+        self,
+        *,
+        venue: str,
+        client: ResolutionClient,
+        detected_at: datetime,
+    ) -> DisappearedProcessingResult:
+        detection = detect_disappeared_candidates(
+            self.settings.source_dir,
+            venue=venue,
+            seen=self.seen_resolutions,
+            now=detected_at,
+            lookback_hours=self.settings.disappeared_lookback_hours,
+            max_candidates=self.settings.disappeared_max_checks_per_cycle,
+        )
+        self.disappeared_candidates_since_heartbeat += detection.disappeared_candidates_seen
+        self.markets_checked_since_heartbeat += len(detection.candidates)
+        if self.settings.dry_run:
+            return DisappearedProcessingResult(
+                candidates_seen=detection.disappeared_candidates_seen,
+                markets_checked=len(detection.candidates),
+                resolutions_detected=0,
+            )
+        written: list[ResolvedMarketOutcome] = []
+        for candidate in detection.candidates:
+            final_snapshot = find_final_book_snapshot(
+                self.settings.source_dir,
+                venue=venue,
+                market_id=candidate.market_id,
+                before=detected_at,
+            )
+            outcome = await client.fetch_resolution_outcome(
+                candidate,
+                detected_at=detected_at,
+                final_snapshot=final_snapshot,
+            )
+            if outcome is None:
+                continue
+            written.append(replace(outcome, is_disappeared_detection=True))
+            self.seen_resolutions.add((venue, candidate.market_id))
+        if written:
+            accepted = await self.writer.write(written)
+            self.total_resolved_since_start += accepted
+            self.resolved_since_heartbeat += accepted
+            self.disappeared_resolutions_since_heartbeat += accepted
+        return DisappearedProcessingResult(
+            candidates_seen=detection.disappeared_candidates_seen,
+            markets_checked=len(detection.candidates),
+            resolutions_detected=len(written),
+        )
 
     async def _emit_heartbeat(self) -> None:
         self._logger.info(
@@ -158,6 +220,8 @@ class ResolutionWatcherRunner:
             metadata_candidates_seen=self.metadata_candidates_since_heartbeat,
             new_resolutions_detected=self.new_resolutions_since_heartbeat,
             api_fallbacks_used=self.api_fallbacks_since_heartbeat,
+            disappeared_candidates_seen=self.disappeared_candidates_since_heartbeat,
+            disappeared_resolutions_detected=self.disappeared_resolutions_since_heartbeat,
             markets_resolved_this_cycle=self.resolved_since_heartbeat,
             total_resolved_since_start=self.total_resolved_since_start,
         )
@@ -166,6 +230,8 @@ class ResolutionWatcherRunner:
         self.metadata_candidates_since_heartbeat = 0
         self.new_resolutions_since_heartbeat = 0
         self.api_fallbacks_since_heartbeat = 0
+        self.disappeared_candidates_since_heartbeat = 0
+        self.disappeared_resolutions_since_heartbeat = 0
 
     async def _sleep_or_stop(self, seconds: float) -> bool:
         try:
@@ -185,6 +251,19 @@ class ResolutionWatcherRunner:
 class ResolutionDetectionResult:
     metadata_candidates_seen: int
     candidates: list[MarketResolutionCandidate]
+
+
+@dataclass(frozen=True)
+class DisappearedDetectionResult:
+    disappeared_candidates_seen: int
+    candidates: list[MarketResolutionCandidate]
+
+
+@dataclass(frozen=True)
+class DisappearedProcessingResult:
+    candidates_seen: int
+    markets_checked: int
+    resolutions_detected: int
 
 
 def detect_resolution_candidates(
@@ -281,6 +360,78 @@ def detect_resolution_candidates(
     )
 
 
+def detect_disappeared_candidates(
+    source_dir: Path,
+    *,
+    venue: str,
+    seen: set[tuple[str, str]],
+    now: datetime,
+    lookback_hours: int = 24,
+    max_candidates: int = 20,
+) -> DisappearedDetectionResult:
+    """Return recently tracked markets missing from the current metadata cycle."""
+
+    metadata_dir = source_dir / "market_metadata_snapshots"
+    if not metadata_dir.exists() or not any(metadata_dir.rglob("*.parquet")):
+        return DisappearedDetectionResult(disappeared_candidates_seen=0, candidates=[])
+    con = duckdb.connect()
+    try:
+        path = _sql_string(str(metadata_dir / "**" / "*.parquet"))
+        columns = _metadata_columns(con, path)
+        lower_bound = _to_utc(now).timestamp() - lookback_hours * 3_600
+        active_lower_bound = _to_utc(now).timestamp() - 30 * 60
+        rows = con.execute(
+            f"""
+            WITH latest_recent AS (
+                SELECT
+                    {_metadata_candidate_select(columns)},
+                    row_number() OVER (
+                        PARTITION BY venue, market_id
+                        ORDER BY captured_at_utc DESC
+                    ) AS rn
+                FROM read_parquet({path}, union_by_name = true)
+                WHERE venue = ?
+                  AND captured_at_utc >= to_timestamp(?)
+            ),
+            currently_active AS (
+                SELECT DISTINCT venue, market_id
+                FROM read_parquet({path}, union_by_name = true)
+                WHERE venue = ?
+                  AND captured_at_utc >= to_timestamp(?)
+            )
+            SELECT
+                r.venue,
+                r.market_id,
+                r.captured_at_text,
+                r.end_date_text,
+                r.status,
+                r.raw_json,
+                r.venue_status_raw,
+                r.is_closed,
+                r.is_resolved,
+                r.resolution_outcome,
+                r.resolution_timestamp_text
+            FROM latest_recent r
+            LEFT JOIN currently_active a
+              ON r.venue = a.venue
+             AND r.market_id = a.market_id
+            WHERE r.rn = 1
+              AND a.market_id IS NULL
+            ORDER BY CAST(r.captured_at_text AS TIMESTAMPTZ) DESC
+            """,
+            [venue, lower_bound, venue, active_lower_bound],
+        ).fetchall()
+    finally:
+        con.close()
+    candidates = [
+        _candidate_from_row(row) for row in rows if (str(row[0]), str(row[1])) not in seen
+    ]
+    return DisappearedDetectionResult(
+        disappeared_candidates_seen=len(candidates),
+        candidates=candidates[:max_candidates],
+    )
+
+
 def _outcome_from_metadata(
     candidate: MarketResolutionCandidate,
     *,
@@ -324,6 +475,61 @@ def _metadata_columns(con: duckdb.DuckDBPyConnection, path: str) -> set[str]:
         f"DESCRIBE SELECT * FROM read_parquet({path}, union_by_name = true)"
     ).fetchall()
     return {str(row[0]) for row in rows}
+
+
+def _metadata_candidate_select(columns: set[str]) -> str:
+    return ",\n                    ".join(
+        [
+            "venue",
+            "market_id",
+            "captured_at_utc::VARCHAR AS captured_at_text",
+            _nullable_select(columns, "end_date", "end_date_text", "TIMESTAMPTZ", stringify=True),
+            _nullable_select(columns, "status", "status", "VARCHAR"),
+            _nullable_select(columns, "raw_json", "raw_json", "VARCHAR"),
+            _nullable_select(columns, "venue_status_raw", "venue_status_raw", "VARCHAR"),
+            _nullable_select(columns, "is_closed", "is_closed", "BOOLEAN"),
+            _nullable_select(columns, "is_resolved", "is_resolved", "BOOLEAN"),
+            _nullable_select(columns, "resolution_outcome", "resolution_outcome", "VARCHAR"),
+            _nullable_select(
+                columns,
+                "resolution_timestamp_utc",
+                "resolution_timestamp_text",
+                "TIMESTAMPTZ",
+                stringify=True,
+            ),
+        ]
+    )
+
+
+def _nullable_select(
+    columns: set[str],
+    column: str,
+    alias: str,
+    sql_type: str,
+    *,
+    stringify: bool = False,
+) -> str:
+    if column not in columns:
+        return f"CAST(NULL AS {sql_type}) AS {alias}"
+    if stringify:
+        return f"{column}::VARCHAR AS {alias}"
+    return f"{column} AS {alias}"
+
+
+def _candidate_from_row(row: tuple[object, ...]) -> MarketResolutionCandidate:
+    return MarketResolutionCandidate(
+        venue=str(row[0]),
+        market_id=str(row[1]),
+        captured_at_utc=_parse_datetime(row[2]),
+        end_date=None if row[3] is None else _parse_datetime(row[3]),
+        status=None if row[4] is None else str(row[4]),
+        raw_json=None if row[5] is None else str(row[5]),
+        venue_status_raw=None if row[6] is None else str(row[6]),
+        is_closed=None if row[7] is None else bool(row[7]),
+        is_resolved=None if row[8] is None else bool(row[8]),
+        resolution_outcome=None if row[9] is None else str(row[9]),
+        resolution_timestamp_utc=None if row[10] is None else _parse_datetime(row[10]),
+    )
 
 
 def load_seen_resolutions(output_dir: Path) -> set[tuple[str, str]]:
