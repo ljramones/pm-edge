@@ -399,6 +399,42 @@ With `PM_EDGE_MAX_ORDER_NOTIONAL_USD=100`, typical order sizes are `150-300` con
 
 The investigation explicitly produced a finding that defers v1 work rather than expanding it. This is by design: the conservative-by-default principle applied to v1 sequencing means doing the cheapest thing that addresses the problem before reaching for more sophisticated infrastructure. Depth walking may genuinely be required later; right now there is a simpler approach to evaluate first.
 
+## Entry 14 — First operational live-resolution event: Eurovision 2026 [ANALYSIS, 2026-05-16]
+
+**Context**
+
+Eurovision Grand Final aired about `21:00-22:30 UTC` on Saturday, 2026-05-16. Pre-show priors recorded around `09:50 EDT` (`13:50 UTC`) showed Italy Top-5 at `0.15-0.20`, which felt anomalously low at the time. Resolution-watcher infrastructure was being deployed during the show; v2 metadata schema landed at `23:29:52 UTC`, after Eurovision markets had already closed and dropped from active tracking. Markets were captured via manual Kalshi API query post hoc.
+
+**Headline finding**
+
+`ITA Top-5` resolved YES from a pre-show implied probability of `15-20%`. Realized return on a flat YES bet at `0.18` would have been about `5.5x`. The market dramatically underpriced Italy's chances.
+
+**Full results**
+
+10 markets observed against pre-show priors where recorded:
+
+- Top-10 markets (8): AUS, ISR, ITA, MOL, DEN, BUL, GRE = YES; ALB = NO.
+- Top-5 markets (4): ITA, ISR, BUL = YES; MOL = NO.
+- Top-3 markets (1): FRA = NO.
+
+Of the 6 markets with recorded pre-show priors, all 6 resolved YES. This is a small sample, but it is worth noting as a possible pattern: Kalshi Eurovision markets may systematically underprice cultural-favorite positions, particularly in higher-uncertainty buckets such as Top-5.
+
+**Inferred partial Eurovision 2026 final ranking**
+
+- Top 5: ISR, ITA, BUL plus 2 unknown.
+- Top 10 additionally: AUS, MOL, DEN, GRE.
+- Did not make Top 10: ALB.
+- Did not make Top 5: MOL.
+- Did not make Top 3: FRA.
+
+**Strategy implications**
+
+One data point is not a strategy, but the ITA Top-5 case is exactly the kind of mispricing pm-edge is designed to detect. If this pattern holds across other low-frequency cultural events, such as Oscars, sports playoffs, and election outcomes, there may be a systematic edge in taking YES on apparent underpricings of established favorites in multi-outcome ranking markets. Track this forward.
+
+**Infrastructure note**
+
+Eurovision missed automatic resolution-watcher capture due to deploy timing artifact: v2 indexer metadata landed after markets closed. Future resolutions are captured automatically once the v2 metadata fields are present. Disappeared-market detection would have caught Eurovision; queue it as Phase 2.1 Sunday/Monday work.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
