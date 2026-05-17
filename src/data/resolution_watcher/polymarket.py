@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+
+from utils.logging import get_logger
 
 from .schema import FinalBookSnapshot, MarketResolutionCandidate, ResolvedMarketOutcome
 
@@ -27,6 +29,7 @@ class PolymarketResolutionClient:
         self.client = client or httpx.AsyncClient(timeout=timeout_seconds)
         self.retry_attempts = retry_attempts
         self._owns_client = client is None
+        self._logger = get_logger(__name__)
 
     async def close(self) -> None:
         if self._owns_client:
@@ -50,16 +53,12 @@ class PolymarketResolutionClient:
         resolved_value = _resolved_value(payload)
         if resolved_value is None:
             return None
+        venue_resolved_at = await self._fetch_venue_resolved_at(condition_id)
         return ResolvedMarketOutcome(
             venue=self.venue,
             market_id=candidate.market_id,
             resolution_timestamp_utc=detected_at,
-            venue_resolved_at_utc=_timestamp(
-                payload.get("resolutionTime")
-                or payload.get("resolvedAt")
-                or payload.get("closedTime")
-                or payload.get("updatedAt")
-            ),
+            venue_resolved_at_utc=venue_resolved_at,
             resolved_value=resolved_value,
             resolution_source="polymarket_api",
             final_top_bid=final_snapshot.top_bid,
@@ -82,6 +81,37 @@ class PolymarketResolutionClient:
         if last_error is not None:
             raise last_error
         return {}
+
+    async def _fetch_venue_resolved_at(self, market_id: str) -> datetime | None:
+        """Fetch the UMA resolution timestamp from Polymarket Gamma.
+
+        Gamma is best-effort here. If the call fails or lacks resolved UMA
+        fields, resolution capture continues with a null venue timestamp.
+        """
+
+        try:
+            response = await self.client.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"condition_ids": market_id, "closed": "true"},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list) or not payload:
+                return None
+            market = payload[0]
+            if not isinstance(market, dict):
+                return None
+            if str(market.get("umaResolutionStatus", "")).lower() != "resolved":
+                return None
+            return _timestamp(market.get("umaEndDate") or market.get("closedTime"))
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, IndexError) as exc:
+            self._logger.warning(
+                "polymarket_gamma_resolution_timestamp_fetch_failed",
+                market_id=market_id,
+                error=str(exc),
+            )
+            return None
 
 
 def _resolved_value(payload: dict[str, Any]) -> float | None:
@@ -147,6 +177,10 @@ def _timestamp(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value
-    text = str(value).replace("Z", "+00:00")
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    text = str(value).strip().replace(" ", "T")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    if "+00" in text and "+00:" not in text:
+        text = text.replace("+00", "+00:00")
     return datetime.fromisoformat(text)
