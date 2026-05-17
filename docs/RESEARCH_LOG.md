@@ -583,6 +583,45 @@ Implement a metadata-only watch list for markets that drop below the activity th
 - Backlog of about `664` disappeared markets draining at decreasing hit rate; priority ordering has already processed the most likely settled candidates.
 - Both services are within memory budgets, swap usage is healthy, and the system is running unattended-stable.
 
+## Entry 19 — First calibration analysis, honest null result [ANALYSIS, 2026-05-17]
+
+**Setup**
+
+Analyzed `111` resolutions with paired pre-resolution book state captured Saturday-Sunday through Phase 2 and Phase 2.1 infrastructure. Computed implied YES probability as the midpoint of final bid/ask and compared it to the realized binary outcome.
+
+**Initial finding, later invalidated**
+
+Markets in the `0.25-0.75` implied-probability range initially appeared to systematically underprice YES outcomes, with gaps of `+21` to `+38` percentage points between implied probability and realized YES rate.
+
+**Critical correction via lag analysis**
+
+Lag analysis showed that `25%` of captures had negative lag, meaning the final book timestamp was after the venue resolution timestamp. These rows contain post-settlement book state and are not valid pre-resolution observations.
+
+Among the remaining valid captures, the apparent underpricing was concentrated in long-lag rows over `120` minutes, where markets had not yet converged to final state at capture time. With negative-lag rows excluded and the analysis restricted to lag under `4h`, the pattern reversed: realized YES rate is below implied probability in every bin from `0` to `0.9`.
+
+**Honest result on cleaned 73-market subset**
+
+- Brier score: `0.159`, indicating the markets are reasonably well-calibrated.
+- Every probability bin below `0.9` shows realized YES rate below implied probability.
+- The `0.9-1.0` bin shows realized `100%` versus implied `96%`.
+- No obvious systematic mispricing pattern is detectable at this sample size.
+
+**Population caveat**
+
+`70` of the `73` cleaned markets are Kalshi MLB sports markets. The sample is not representative of prediction markets generally. Eurovision-style cultural markets are nearly absent from this subset.
+
+**Methodological lesson**
+
+Calibration analysis is highly sensitive to capture-timing artifacts. Future analyses filter on lag-to-resolution before drawing inferences. The edge reported in the first cut was explained by stale final-book captures.
+
+**What the analysis does not show**
+
+- Whether market-orderbook dynamics, including depth, volume, and spread changes, carry signal beyond mid-price.
+- Whether specific market categories, including cultural events and geopolitics, have different calibration profiles than sports.
+- Whether intraday price movements predict resolution direction.
+
+These remain next-iteration research questions once more data accumulates.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
