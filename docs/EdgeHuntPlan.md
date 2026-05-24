@@ -165,8 +165,12 @@ tiny. High effort, uncertain sample.
 
 These don't find edge but unblock experiments / backtesting:
 
-- **P0a — Simulator resting-order ValueError** (`fill_logic.py:42,61`): blocks any
-  maker-side backtest. Needed before any experiment graduates from "calibration
+- **P0a — Simulator raises on price-improving resting orders**
+  (`fill_logic.py:42` buy / `:61` sell — verified current 2026-05-24): a limit
+  order placed inside the spread raises `ValueError` ("v0 does not model queue
+  placement for improving resting orders") instead of simulating a fill. (Resting
+  orders at or behind the touch return unfilled, they do not raise.) Blocks any
+  maker-side backtest; needed before any experiment graduates from "calibration
   gap exists" to "tradeable after costs."
 - **P0b — Simulator top-of-book-only fills**: the depth-dependence finding (27% of
   large trades walk the book) proves this mismodels large orders. Needed before
@@ -194,9 +198,16 @@ These don't find edge but unblock experiments / backtesting:
 
 ## Estimated aggregate
 
-If P(success) values are roughly independent, P(at least one yields tradeable
-edge) ≈ 1 − (0.75)(0.85)(0.88)(0.90)(0.92) ≈ **~52%**. Honest read: roughly a
-coin-flip that *something* here is real, concentrated almost entirely in
-Experiments 1 and 2. That is worth pursuing — but with the kill conditions firmly
-in place, because the base rate of "retail finds durable edge in prediction
-markets" is low and the failure mode is expensive.
+Treating the P(success) values as independent, P(at least one yields tradeable
+edge) ≈ 1 − (0.75)(0.85)(0.88)(0.90)(0.92) = 1 − 0.4647 ≈ **53.5%**.
+
+**Caveat — these are not independent.** Experiments 1, 3, 4, and 5 are all
+flavors of "is there a persistent mispricing somewhere," and they share the
+common cause "are these markets efficient." If markets are broadly efficient (the
+most likely world), those experiments die *together*, not independently — the
+failures cluster — so the true aggregate is likely *below* this naive product.
+
+Honest read: a coin-flip at best that *something* here is real, concentrated
+almost entirely in Experiments 1 and 2. That is worth pursuing — but with the kill
+conditions firmly in place, because the base rate of "retail finds durable edge in
+prediction markets" is low and the failure mode is expensive.
