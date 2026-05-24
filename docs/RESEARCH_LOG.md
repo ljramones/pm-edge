@@ -730,6 +730,58 @@ The volatility result is worth tracking but not acting on. The sample is only `3
 3. Test earlier horizons, especially `6h` and `24h` before resolution, where convergence artifacts are weaker and mispricing is more plausible.
 4. Compare volatility to spread and liquidity to determine whether the feature is measuring information uncertainty or simply thin-book noise.
 
+## Entry 23 — Microstructure features do not predict outcomes; the data explains why
+### 2026-05-24 (Week 2 close)
+
+**Question (pre-registered):** Does pre-resolution price volatility predict
+resolution outcome beyond the mid-price level? (The last hypothesis left alive
+after Entries 21–22; volatility showed marginal promise at n=35, p=0.056.)
+
+**Result: NULL — and the reason is structural, not statistical.**
+
+Retested on the clean post-lag-fix week (251 clean Kalshi resolutions, 133 with
+a computable volatility window). The logistic regression would not converge:
+the volatility feature is 94.7% near-zero, 30% exactly zero, median 5.5e-17.
+Standardizing did not help (still non-convergent, trillion-scale standard errors)
+— there is no variation to regress on.
+
+**Why: Kalshi prices are frozen pre-resolution.** Density check on the
+[-120min, -30min] window:
+- Snapshots captured per market: median **353** (range 0–716) — dense capture
+- DISTINCT mid values per market: median **1**
+- 96.2% of markets have ≤1 distinct mid; 100% have ≤2
+
+The book is captured densely, but the mid-price takes a single value for the
+entire pre-resolution window in 96% of markets. The market prices once, holds
+flat, then resolves. There is no trajectory to mine.
+
+**This explains all four prior nulls with one mechanism:**
+- Calibration gap (E19–20): lag artifact, well-calibrated once controlled
+- Depth imbalance (E21): p=0.47 — static book at a frozen price adds nothing
+- Velocity (E22): p=0.97 at n=86 — no price movement to have velocity
+- Volatility (E23): degenerate fit — no price movement to have volatility
+
+**Polymarket cannot rescue this either.** Polymarket has price movement, but its
+capture-to-resolution lag is a median of ~16 hours (max 9.5 days) because markets
+enter the resolved set via disappeared-detection long after they go quiet. Only
+21/111 survive a <4h lag filter, and those are pre-converged extremes (Brier
+0.009 is an artifact of near-decided markets, not skill).
+
+**Conclusion.** Book state at the granularity captured does not contain predictive
+signal beyond the mid-price, on either venue, for distinct reasons:
+- **Kalshi**: prices frozen pre-resolution (no trajectory)
+- **Polymarket**: books too stale relative to resolution (no near-resolution book)
+
+This closes the snapshot-microstructure line of inquiry. Any future edge would
+require either (a) capturing the brief active-repricing window Kalshi markets have
+right at resolution (currently missed — the price jumps from frozen to resolved
+without captured intermediate states), or (b) a venue/market type with continuous
+liquid pre-resolution pricing AND tight capture-to-resolution pairing, which
+neither current venue provides.
+
+**Dead hypotheses (do not re-run):** calibration-gap, depth-imbalance, velocity,
+volatility. All four nulls, one cause.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
