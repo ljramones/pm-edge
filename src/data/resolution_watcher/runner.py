@@ -878,7 +878,7 @@ async def main_loop(settings: ResolutionWatcherSettings) -> None:
 
 def main() -> int:
     settings = ResolutionWatcherSettings()
-    configure_logging()
+    configure_logging(http_log_level=settings.http_log_level)
     asyncio.run(main_loop(settings))
     return 0
 

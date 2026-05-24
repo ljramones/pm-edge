@@ -23,8 +23,25 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
 
-def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
-    """Configure loguru and structlog with shared context support."""
+def _coerce_log_level(name: str) -> int | None:
+    """Return the numeric logging level for ``name``, or ``None`` if invalid."""
+
+    return logging.getLevelNamesMapping().get(name.strip().upper())
+
+
+def configure_logging(
+    *,
+    level: str = "INFO",
+    json_logs: bool = False,
+    http_log_level: str = "WARNING",
+) -> None:
+    """Configure loguru and structlog with shared context support.
+
+    ``http_log_level`` sets the level of the ``httpx`` and ``httpcore`` stdlib
+    loggers. It defaults to ``WARNING`` so per-request ``HTTP Request`` INFO
+    lines do not flood the journal, while failed/non-2xx requests still log.
+    An unrecognised value falls back to ``WARNING`` with a logged warning.
+    """
 
     logger.remove()
     logger.add(
@@ -37,6 +54,13 @@ def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
     )
 
     logging.basicConfig(handlers=[InterceptHandler()], level=level.upper(), force=True)
+
+    resolved_http_level = _coerce_log_level(http_log_level)
+    if resolved_http_level is None:
+        logger.warning("Invalid http_log_level {!r}; falling back to WARNING", http_log_level)
+        resolved_http_level = logging.WARNING
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(resolved_http_level)
 
     processors: list[Any] = [
         structlog.contextvars.merge_contextvars,

@@ -1074,6 +1074,7 @@ async def test_forward_index_dry_run_smoke(monkeypatch: pytest.MonkeyPatch, tmp_
     class Settings:
         log_level = "INFO"
         log_json = False
+        http_log_level = "WARNING"
         forward_indexer_emit_cadence_seconds = 15
         forward_indexer_discovery_cadence_seconds = 300
         forward_indexer_book_depth_levels = 5

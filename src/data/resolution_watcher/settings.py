@@ -41,3 +41,10 @@ class ResolutionWatcherSettings(BaseSettings):
         ),
     )
     dry_run: bool = False
+    http_log_level: str = Field(
+        default="WARNING",
+        validation_alias=AliasChoices(
+            "PM_EDGE_HTTP_LOG_LEVEL",
+            "PM_EDGE_RESOLUTION_WATCHER_HTTP_LOG_LEVEL",
+        ),
+    )

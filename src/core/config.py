@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
     log_json: bool = False
+    http_log_level: str = "WARNING"
 
     data_dir: Path = Path("data")
     raw_data_dir: Path = Path("data/raw")

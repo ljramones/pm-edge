@@ -114,7 +114,11 @@ async def run() -> None:
     """Run the configured forward indexer."""
 
     settings = get_settings()
-    configure_logging(level=settings.log_level, json_logs=settings.log_json)
+    configure_logging(
+        level=settings.log_level,
+        json_logs=settings.log_json,
+        http_log_level=settings.http_log_level,
+    )
     args = parse_args()
     selected_venues = {venue.strip().lower() for venue in args.venues.split(",") if venue.strip()}
     client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
