@@ -1,0 +1,28 @@
+# Recommended cron entry for the pm-edge parquet compaction job.
+#
+# The forward indexer and resolution watcher write one small parquet part-file
+# per partition per flush (~every 15 s). Left unchecked, each (table, venue,
+# date) directory accumulates thousands of tiny files, which makes recursive
+# read_parquet('.../**/*.parquet') globs hang and slows ext4 lookups and rsync.
+#
+# This job merges those small part-files into a few large ones for every
+# partition strictly older than today (UTC). It never touches today's partition,
+# so it is safe to run while the indexer is live, and it verifies row counts
+# before deleting any source file.
+#
+# Roll out in two phases:
+#
+# 1. Dry-run only for a few days (logs what *would* be compacted, writes nothing):
+#
+# 30 9 * * * /opt/pm-edge/.venv/bin/python /opt/pm-edge/scripts/compact_parquet.py --dry-run >> /opt/pm-edge/data/compact_parquet.log 2>&1
+#
+# 2. Once the dry-run output looks right, enable the real compaction. Schedule it
+#    at a low-activity hour and BEFORE the laptop's morning rsync so the smaller
+#    file set is what gets pulled:
+#
+# 30 9 * * * /opt/pm-edge/.venv/bin/python /opt/pm-edge/scripts/compact_parquet.py >> /opt/pm-edge/data/compact_parquet.log 2>&1
+#
+# By default it compacts both configured archive roots
+# (PM_EDGE_FORWARD_INDEXER_OUTPUT_DIR and the resolution watcher output dir).
+# Pass --root PATH (repeatable) to target specific roots, and --target-file-mb
+# to change the ~256 MiB per-file cap.

@@ -206,6 +206,33 @@ Recommended cadence while the data layer is proving out:
 - Run DuckDB smoke checks after each rsync until the archive process is boring.
 - Keep raw parquet immutable; do not edit or rewrite synced parts by hand.
 
+## Parquet Compaction
+
+The indexer and resolution watcher write one small parquet part-file per partition on every flush (~every 15 s), so each `(table, venue, date)` directory accumulates thousands of tiny files over a week. That makes recursive `read_parquet('.../**/*.parquet')` globs hang, slows ext4 directory lookups, and slows rsync metadata sync. `scripts/compact_parquet.py` merges the small part-files in each partition into a few large ones.
+
+Safety model:
+
+- **Never touches today's partition.** Only partitions strictly older than today (UTC) are compacted, so the live writer is never raced.
+- **Verify before delete.** The compacted output row count must equal the sum of the input row counts before any source file is removed.
+- **Crash-safe.** Output is written to a hidden `.tmp-compact-*` file, renamed to its final `compact-*` name (the durable commit marker), and only then are the source `part-*` files deleted. A crash between the rename and the deletes is self-healed on the next run.
+- **Idempotent.** A partition that already consists only of `compact-*` files (or a single file) is skipped, so it is safe to re-run.
+
+Dry-run first (writes/deletes nothing, just logs what would happen):
+
+```bash
+/opt/pm-edge/.venv/bin/python /opt/pm-edge/scripts/compact_parquet.py --dry-run
+```
+
+Real run (compacts both configured archive roots — forward index and resolved outcomes):
+
+```bash
+/opt/pm-edge/.venv/bin/python /opt/pm-edge/scripts/compact_parquet.py
+```
+
+Useful flags: `--root PATH` (repeatable) to target specific roots, `--target-file-mb` to change the ~256 MiB per-file cap. Watch the `parquet_compaction_partition` / `parquet_compaction_summary` structured log lines for `files_before`/`files_after`/`rows`.
+
+Install the cron entry from `deploy/forward_indexer/compact_parquet.cron`. Run `--dry-run` daily for a few days, then enable the real run at a low-activity hour **before** the laptop's morning rsync so the smaller file set is what gets pulled. This pairs with the journald retention cap on the VPS (`SystemMaxUse=500M`, `MaxRetentionSec=2week`): compaction reduces file count at the source, the journald cap is the log backstop.
+
 ## Notebook Setup
 
 Install the analysis extras:
@@ -291,6 +318,8 @@ The notebooks are for exploration, not strategy approval. Strategy conclusions r
 
 - `docs/forward_indexer.md`: producer architecture and failure modes
 - `deploy/forward_indexer/ops_status.cron`: status-page cron example
+- `deploy/forward_indexer/compact_parquet.cron`: parquet compaction cron example
+- `scripts/compact_parquet.py`: parquet part-file compaction job
 - `deploy/forward_indexer/rsync_to_laptop.sh`: laptop sync script
 - `deploy/forward_indexer/running-rsync.md`: rsync setup notes
 - `notebooks/README.md`: notebook conventions
