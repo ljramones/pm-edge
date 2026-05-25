@@ -23,6 +23,14 @@ NoNewPrivileges=true
 MemoryHigh=1500M
 MemoryMax=1800M
 MemoryAccounting=yes
+# App-level memory ceiling (distinct from the cgroup caps above): the emit loop
+# flushes and the hi-cad near-resolution loop auto-sheds when process RSS exceeds
+# this. Set here (after EnvironmentFile=, so it wins) rather than only in the
+# hand-maintained .env, because it is load-bearing for Experiment 2 correctness:
+# at the 1024M code default the hi-cad shed fires early under the raised two-axis
+# baseline and under-captures. 1300M sits just under MemoryHigh=1500M. Versioned
+# here so a redeploy cannot silently revert it. See EXPERIMENT_2_DEPLOY_RUNBOOK.md.
+Environment=PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300
 
 [Install]
 WantedBy=multi-user.target

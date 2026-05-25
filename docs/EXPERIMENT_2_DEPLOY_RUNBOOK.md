@@ -51,15 +51,17 @@ Read these before trusting any number below.
   normal-cadence (15s) capture of every near-close market in its final ~2h that was
   previously dropped. Expect a higher normal-capture baseline, not just hi-cad
   volume. (Flag OFF: the filter is unchanged, byte-identical behaviour.)
-- **Hi-cad auto-sheds at `max_memory_mb`, default 1024M** (env
-  `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB`) — NOT at the 1500M cgroup wall. This is
-  the app's own ceiling and is the FIRST line of defense (it sheds hi-cad markets to
-  zero, logged as `forward_indexer_near_resolution_shed`), below the operator's
-  manual intervene points and well below the kernel reclaim at MemoryHigh=1500M.
-  **At the default 1024M the shed will fire early** given the raised two-axis
-  baseline, under-capturing. For Exp 2, set `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB`
-  to ~1300M (in `.env`, alongside the feature flags) so the auto-shed sits just
-  under the 1500M wall and matches the GATE 3 intervene guidance.
+- **Hi-cad auto-sheds at `max_memory_mb`** (env `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB`,
+  code default 1024M) — NOT at the 1500M cgroup wall. This is the app's own ceiling
+  and the FIRST line of defense (it sheds hi-cad markets to zero, logged as
+  `forward_indexer_near_resolution_shed`), below the operator's manual intervene
+  points and well below the kernel reclaim at MemoryHigh=1500M. **Set to 1300M in the
+  tracked unit** (`forward-indexer.service` `Environment=PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300`)
+  — not in `.env` — because it is load-bearing for experiment correctness and must
+  survive redeploys (at the 1024M default the shed fires early under the raised
+  two-axis baseline and under-captures). 1300M sits just under the 1500M wall and
+  matches the GATE 3 intervene guidance. Deploy it the same way as the caps:
+  `cp` the unit + `daemon-reload`; verify with `systemctl show -p Environment`.
 
 ## Deploying a unit-file change (read once)
 
@@ -158,11 +160,12 @@ First live exposure at a third of the write pressure. Start small.
 #   PM_EDGE_NEAR_RESOLUTION_MAX_MARKETS=10        # NOT 30
 #   PM_EDGE_NEAR_RESOLUTION_CADENCE_SECONDS=5     # NOT 2
 #   PM_EDGE_NEAR_RESOLUTION_WINDOW_SECONDS=1800
-# Raise the app memory ceiling so hi-cad's auto-shed sits just under the 1500M wall
-# instead of the 1024M default (which would shed early under the raised baseline):
-#   PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300
+# NOTE: the app memory ceiling (PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300) is NOT
+# set here — it lives in the tracked unit's Environment= so it survives redeploys.
+# Ensure the unit is the current version on the box (cp + daemon-reload) and confirm
+# with: systemctl show forward-indexer -p Environment | tr ' ' '\n' | grep MAX_MEMORY
 
-# .env edits need only a restart. If you instead edited the .service file, also:
+# .env edits need only a restart. If you updated the .service file, also:
 #   sudo cp deploy/forward_indexer/systemd/forward-indexer.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 sudo systemctl restart forward-indexer
@@ -227,10 +230,11 @@ sudo systemctl restart forward-indexer
 | Load avg | < 3 | toward 5+ → DISABLE |
 | Swap | flat/draining | climbing → DISABLE |
 
-> Memory bands assume `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300` (set at GATE 2),
-> so the code's auto-shed (~1300M) and the manual `memory_mb` intervene point (~1300M)
-> coincide — the shed fires first, the manual row is the backstop if it doesn't hold.
-> Same two-axis baseline caveat as GATE 2 applies, larger here at full settings.
+> Memory bands assume `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300` (set in the
+> tracked unit's `Environment=`), so the code's auto-shed (~1300M) and the manual
+> `memory_mb` intervene point (~1300M) coincide — the shed fires first, the manual
+> row is the backstop if it doesn't hold. Same two-axis baseline caveat as GATE 2
+> applies, larger here at full settings.
 
 **PASS:** clean full-settings window, `memory_mb` comfortably under HIGH, cap holds.
 → Feature is live. The accumulation clock starts now — record the date and track it
