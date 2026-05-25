@@ -1,7 +1,11 @@
 # Experiment 2 — Near-Resolution Capture: Deploy & Monitor Runbook
-_Created 2026-05-24. Supervised rollout of a memory-risky capture change on a box
-with an OOM/thrash history. Do NOT deploy-and-walk-away. Stay on the box for the
-first full near-resolution window at each settings tier._
+_Created 2026-05-24. Amended 2026-05-24 (reconciliation pass): memory thresholds
+re-anchored to the real 1500M wall, unit-deploy `cp` step added, duration/stop rule
++ kill condition pre-registered, provisional names reconciled against existing code._
+
+_Supervised rollout of a memory-risky capture change on a box with an OOM/thrash
+history. Do NOT deploy-and-walk-away. Stay on the box for the first full
+near-resolution window at each settings tier._
 
 ## Why this runbook exists
 
@@ -13,16 +17,15 @@ rollback that needs no redeploy.
 
 ## Repo-verified facts (checked 2026-05-24 against the tracked code)
 
-Read these before trusting any number below — several were stale in the first draft.
+Read these before trusting any number below.
 
-- **The forward-indexer systemd unit has NO `MemoryHigh`/`MemoryMax` directives.**
-  `deploy/forward_indexer/systemd/forward-indexer.service` sets only
-  `Restart=on-failure`, `RestartSec=10`, `KillSignal=SIGTERM`, `TimeoutStopSec=60`.
-  The "MemoryHigh=1200M/MemoryMax=1500M" from commit `392b4d2` is **not in the
-  unit file** — that commit only added a doc (`SESSION_PROMPT_FRIDAY_2026-05-22.md`).
-  So the indexer's effective memory cap is whatever was applied directly on the box
-  (possibly nothing, in which case only the kernel OOM killer applies).
-  **→ Verify the real cap on the box first (GATE 0); do not assume 900M or 1200M.**
+- **The forward-indexer unit now declares `MemoryHigh=1500M` / `MemoryMax=1800M`**
+  (`deploy/forward_indexer/systemd/forward-indexer.service`, added 2026-05-24 for the
+  4GB box; the live box runs these too). This closed an earlier gap where the unit
+  had NO caps while commit `392b4d2`'s message *claimed* 1200M/1500M but only touched
+  a doc. `MemoryHigh` is the soft wall (kernel reclaims pages above it — gentle
+  degradation), `MemoryMax` the hard cgroup cap. **Still verify the live values via
+  GATE 0 (`systemctl show`) — the box is authoritative, not this doc.**
 - **Indexer stop is graceful but fast, NOT "no wait".** On `SIGTERM` the runner
   installs a handler → `stop()` → flushes all venue buffers + the parquet writer →
   exits (`runner.py` `_install_signal_handlers` / `stop`). Bounded by
@@ -31,12 +34,32 @@ Read these before trusting any number below — several were stale in the first 
   one is the watcher" is right; "the indexer has no graceful wait" is not.
 - **Confirmed-real heartbeat fields:** `forward_indexer_heartbeat` already emits
   `memory_mb` and `snapshots_per_second` (`runner.py:252`). Use these as-is.
-- **PROVISIONAL identifiers (do NOT exist until the capture-change code is written):**
-  the env vars `PM_EDGE_NEAR_RESOLUTION_*`, the heartbeat field
-  `near_resolution_markets_active`, and `snapshot_source='near_resolution_hicad'`
-  are proposed names. **Reconcile every name in this runbook against the actual
-  code once the agent returns it** — if they don't match, the monitoring and the
-  data-isolation both silently fail.
+- **PROVISIONAL identifiers — the producer (capture-change) code is NOT written yet.**
+  The env vars `PM_EDGE_NEAR_RESOLUTION_*` and the heartbeat field
+  `near_resolution_markets_active` exist in **no code** today; treat them as proposed
+  names and reconcile against the capture-change code the moment it lands. The
+  snapshot_source tag `near_resolution_hicad` is already assumed by the CONSUMER
+  `scripts/experiment_02_capture_rate.py` (`HICAD_SOURCE`), so the producer MUST emit
+  exactly `near_resolution_hicad` — if it emits anything else, both the capture-rate
+  check and the 2-week data isolation silently break. Lock all of these in the same
+  commit that adds the capture code.
+
+## Deploying a unit-file change (read once)
+
+`setup_vps.sh` **copies** the unit to `/etc/systemd/system/` — it is not symlinked
+to the repo. So a `git pull` alone does NOT update the live unit (learned the hard
+way). Any time the `.service` file changes, the deploy is:
+
+```bash
+sudo cp /opt/pm-edge/deploy/forward_indexer/systemd/forward-indexer.service \
+  /etc/systemd/system/forward-indexer.service
+sudo systemctl daemon-reload
+sudo systemctl restart forward-indexer
+```
+
+Feature flags here are set via `EnvironmentFile=/opt/pm-edge/.env`, which does NOT
+need a `cp` — only `daemon-reload` is not even required for `.env` edits, just a
+restart. The `cp` + `daemon-reload` dance is specifically for `.service` edits.
 
 ---
 
@@ -57,9 +80,9 @@ sudo journalctl -u forward-indexer --since "2 minutes ago" --no-pager | grep hea
 
 Record what you actually see (do not copy the examples):
 
-- **`MemoryHigh` (the wall)** = ________  ← call this **HIGH** below. If it reports
-  `infinity`, there is NO cgroup cap — only the kernel OOM killer; treat ~80% of
-  total RAM as HIGH and be more conservative.
+- **`MemoryHigh` (the wall)** = ________  ← call this **HIGH** below. Expect
+  `1572864000` (=1500M). If it reports `infinity`, the cap did not deploy — fix that
+  before proceeding (see "Deploying a unit-file change").
 - `MemoryCurrent` (now) = ________
 - `memory_mb` (heartbeat) = ________   (expected baseline this week: ~260–560M)
 - `snapshots_per_second` = ________    (expected baseline: ~15–35)
@@ -67,9 +90,9 @@ Record what you actually see (do not copy the examples):
 - Swap used (`free -m`) = ________     (expected: low / draining)
 
 > **All memory thresholds below are written as fractions of HIGH, with example
-> absolute numbers assuming HIGH≈1200M. If your verified HIGH differs, re-scale
-> the absolute numbers before you start.** Intervene tier: ~0.75×HIGH rising;
-> hard wall: HIGH.
+> absolute numbers assuming HIGH≈1500M. If your verified HIGH differs, re-scale the
+> absolute numbers before you start.** Intervene tier: ~0.75×HIGH (≈1100M) and
+> rising; hard wall: HIGH (1500M; the hard cgroup cap MemoryMax=1800M is above it).
 
 ---
 
@@ -84,6 +107,10 @@ ssh pmedge@165.245.235.75
 cd /opt/pm-edge
 git pull origin main
 sudo /root/.local/bin/uv pip install --python /opt/pm-edge/.venv/bin/python -e ".[dev]"
+# If this deploy ALSO changed the .service file (e.g. memory caps), update the unit
+# too — git pull does NOT update the live unit:
+#   sudo cp deploy/forward_indexer/systemd/forward-indexer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
 sudo systemctl restart forward-indexer    # SIGTERM flush+exit, usually seconds (cap 60s)
 
 # Verify no-op: wait 2 min, check heartbeat
@@ -108,16 +135,17 @@ CODE bug, not the feature. Do not enable. Investigate or roll back the deploy.
 First live exposure at a third of the write pressure. Start small.
 
 ```bash
-# Set conservative env overrides where the indexer reads its environment:
-# the unit uses EnvironmentFile=/opt/pm-edge/.env — add these there (or as
-# [Service] Environment= lines if you switch to that pattern). VERIFY the exact
-# variable names against the code the agent returns; the names below are PROVISIONAL.
+# Set conservative env overrides in the indexer's EnvironmentFile (/opt/pm-edge/.env).
+# VERIFY the exact variable names against the capture-change code; the names below
+# are PROVISIONAL (no producer code exists yet).
 #   PM_EDGE_NEAR_RESOLUTION_CAPTURE_ENABLED=true
 #   PM_EDGE_NEAR_RESOLUTION_MAX_MARKETS=10        # NOT 30
 #   PM_EDGE_NEAR_RESOLUTION_CADENCE_SECONDS=5     # NOT 2
 #   PM_EDGE_NEAR_RESOLUTION_WINDOW_SECONDS=1800
 
-sudo systemctl daemon-reload    # only needed if the unit file itself was edited
+# .env edits need only a restart. If you instead edited the .service file, also:
+#   sudo cp deploy/forward_indexer/systemd/forward-indexer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
 sudo systemctl restart forward-indexer
 ```
 
@@ -133,20 +161,19 @@ free -m
 uptime
 ```
 
-**Watch these fields against thresholds (memory relative to verified HIGH):**
+**Watch these fields against thresholds (memory relative to verified HIGH=1500M):**
 
 | Field | Healthy | INTERVENE |
 |---|---|---|
-| `memory_mb` | < ~0.6×HIGH (≈700M @1200M) | climbing past ~0.65×HIGH (≈750M) and not leveling → shed/disable |
+| `memory_mb` | < ~0.73×HIGH (≈1100M @1500M) | climbing past ~0.8×HIGH (≈1200M) and not leveling → shed/disable |
 | `near_resolution_markets_active` *(provisional)* | ≤ 10 (the cap) | > 10 → cap logic broken, DISABLE NOW |
 | `snapshots_per_second` | baseline + ~2 | unbounded growth → DISABLE |
 | Load avg | < 3 | climbing toward 5+ → thrash risk, DISABLE |
 | Swap used | flat/draining | climbing steadily → thrash canary, DISABLE |
 
 **PASS criteria:** one full window completes with hi-cad snapshots written
-(the provisional `snapshot_source='near_resolution_hicad'` — or whatever the code
-actually tags them — appearing in the data), cap respected, memory and load within
-healthy bounds the whole time.
+(`snapshot_source='near_resolution_hicad'` appearing in the data), cap respected,
+memory and load within healthy bounds the whole time.
 
 **STOP/ROLLBACK if** any INTERVENE threshold trips (see ROLLBACK below).
 
@@ -159,7 +186,7 @@ Only after a clean conservative window.
 ```bash
 #   PM_EDGE_NEAR_RESOLUTION_MAX_MARKETS=30
 #   PM_EDGE_NEAR_RESOLUTION_CADENCE_SECONDS=2
-sudo systemctl daemon-reload    # if unit edited
+# .env edit -> just restart; .service edit -> cp + daemon-reload first (see above).
 sudo systemctl restart forward-indexer
 ```
 
@@ -167,14 +194,15 @@ sudo systemctl restart forward-indexer
 
 | Field | Healthy | INTERVENE |
 |---|---|---|
-| `memory_mb` | < ~0.65×HIGH (≈750M @1200M) | past ~0.7×HIGH (≈800M) rising → shed/disable (HIGH is the wall) |
+| `memory_mb` | < ~0.8×HIGH (≈1200M @1500M) | past ~0.87×HIGH (≈1300M) rising → shed/disable (HIGH=1500M is the wall) |
 | `near_resolution_markets_active` *(provisional)* | ≤ 30 | > 30 → DISABLE NOW |
 | `snapshots_per_second` | baseline + ~15 | unbounded → DISABLE |
 | Load avg | < 3 | toward 5+ → DISABLE |
 | Swap | flat/draining | climbing → DISABLE |
 
 **PASS:** clean full-settings window, `memory_mb` comfortably under HIGH, cap holds.
-→ Feature is live. The 2-week accumulation clock starts now. Record the date.
+→ Feature is live. The accumulation clock starts now — record the date and track it
+with the rate check (see **Duration & stop rule**).
 
 ---
 
@@ -186,7 +214,7 @@ usually seconds, bounded by `TimeoutStopSec=60` — faster than the watcher's 90
 ```bash
 # Disable the feature: set the enable flag back to false in the EnvironmentFile/.env
 #   PM_EDGE_NEAR_RESOLUTION_CAPTURE_ENABLED=false
-sudo systemctl restart forward-indexer    # daemon-reload first only if the unit was edited
+sudo systemctl restart forward-indexer    # .env edit needs only a restart
 # Confirm back to baseline
 sleep 60; sudo journalctl -u forward-indexer --since "1 minute ago" --no-pager | grep heartbeat | tail -2
 free -m
@@ -202,21 +230,44 @@ a thrashing box.
 
 ---
 
+## Duration & stop rule (pre-registered)
+
+Pre-registered BEFORE any data accumulates, so the duration can't quietly stretch.
+**"Collect until it works" is forbidden** — that is how a 15%-prior experiment
+becomes a permanent cost.
+
+- **Target:** ~150 clean hi-cad-captured **resolved** Kalshi events before the Exp 2
+  analysis is trusted. The high end is deliberate: small-n positives in this project
+  have consistently been noise (Entries 19–24).
+- **48h GATE:** run `scripts/experiment_02_capture_rate.py` 48h after GATE 3 and read
+  the days-to-150 projection.
+  - On track for **≤3 weeks** → continue.
+  - Projection **>4 weeks** → decision point: widen the near-resolution window
+    (`PM_EDGE_NEAR_RESOLUTION_WINDOW_SECONDS`), raise the market cap
+    (`PM_EDGE_NEAR_RESOLUTION_MAX_MARKETS` — re-watch memory per GATE 3 if you do), or
+    stop. A 15% prior is not worth 6 weeks.
+- **Week-1 GATE:** re-run the rate check, re-project, decide again.
+- **Hard patience stop: 3 weeks maximum**, regardless — unless the week-1 check shows
+  150 is clearly reachable just past it.
+- **Stop when the target is hit OR the patience limit is reached, whichever comes
+  first.**
+
+---
+
 ## After a clean GATE 3
 
-1. **Commit the enabled settings to the repo** so a future redeploy doesn't revert
-   them — and while you're there, **fix the unit drift**: if the indexer is meant
-   to have `MemoryHigh`/`MemoryMax`, add them to the tracked
-   `deploy/forward_indexer/systemd/forward-indexer.service` (it currently has none),
-   so the repo matches the box.
-2. **Pre-register the Exp 2 kill condition** in RESEARCH_LOG.md / EdgeHuntPlan.md
+1. **Commit the enabled feature settings** so a future redeploy doesn't revert them.
+   (The memory caps are already in the tracked unit — `MemoryHigh=1500M`/
+   `MemoryMax=1800M` — so no unit drift remains to fix.)
+2. **Pre-register the Exp 2 KILL CONDITION** in RESEARCH_LOG.md / EdgeHuntPlan.md
    BEFORE any analysis (do it now, while you can't see results):
-   > Exp 2 analysis (~2 weeks out): in the hi-cad near-resolution window, does the
-   > price move BEFORE the public event signal, or only with/after it? KILL if the
-   > price moves with-or-after the event with no capturable lead, OR if any lead is
-   > sub-second / smaller than spread+fees (untradeable). PURSUE only if a
+   > In the hi-cad window, does price move BEFORE the public event signal, or only
+   > with/after it? KILL if price moves with-or-after with no capturable lead, OR if
+   > any lead is sub-second / smaller than spread+fees (untradeable). PURSUE only if a
    > consistent, exploitable lead/lag pattern exists above transaction costs.
-3. **Set a calendar reminder** for the 2-week analysis date.
+3. **Track the rate** with `scripts/experiment_02_capture_rate.py` at 48h and week 1,
+   per the Duration & stop rule. Set a calendar reminder for the projected target
+   date (and the 3-week patience stop).
 4. **Do NOT walk away the first day.** Check the heartbeat a few times over the
    first 24h to confirm memory stays bounded as more markets cycle through windows.
 
@@ -227,8 +278,8 @@ a thrashing box.
 - The compaction job (`scripts/compact_parquet.py`) already skips today's
   partition, so the extra hi-cad snapshots won't be touched until the day after —
   no interaction risk.
-- Confirm hi-cad snapshots are actually tagged distinctly in the data (whatever the
-  code names the source). Without a distinct tag the experiment's data can't be
-  isolated from normal captures and the whole 2 weeks is wasted.
+- The producer MUST tag hi-cad snapshots `snapshot_source='near_resolution_hicad'`
+  exactly — the capture-rate check and the whole 2-week isolation depend on that
+  literal tag.
 - Re-anchor every memory threshold to the **verified** HIGH from GATE 0; the
-  absolute numbers in the tables assume HIGH≈1200M and are illustrative.
+  absolute numbers in the tables assume HIGH≈1500M and are illustrative.
