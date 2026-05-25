@@ -31,6 +31,9 @@ MemoryAccounting=yes
 # baseline and under-captures. 1300M sits just under MemoryHigh=1500M. Versioned
 # here so a redeploy cannot silently revert it. See EXPERIMENT_2_DEPLOY_RUNBOOK.md.
 Environment=PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300
+Environment=PM_EDGE_NEAR_RESOLUTION_CAPTURE_ENABLED=true
+Environment=PM_EDGE_NEAR_RESOLUTION_MAX_MARKETS=30
+Environment=PM_EDGE_NEAR_RESOLUTION_CADENCE_SECONDS=2
 
 [Install]
 WantedBy=multi-user.target
