@@ -221,21 +221,69 @@ def test_multi_timescale_aggregation(tmp_path: Path) -> None:
     assert int(aggs["1 hour"]["snapshots"].sum()) == 2
 
 
-def test_resolved_market_outcomes_stub(tmp_path: Path) -> None:
-    con = queries.get_connection(write_forward_index_fixture(tmp_path))
+def test_resolved_market_outcomes_reads_real_parquet(tmp_path: Path) -> None:
+    resolved_dir = write_resolved_fixture(tmp_path)
+    con = duckdb.connect()
 
-    df = queries.resolved_market_outcomes(con)
+    df = queries.resolved_market_outcomes(con, resolved_dir=resolved_dir)
 
-    assert df.empty
-    assert list(df.columns) == [
-        "venue",
-        "market_id",
-        "resolution_timestamp",
-        "resolved_value",
-        "final_top_bid",
-        "final_top_ask",
-        "final_spread",
-    ]
+    assert not df.empty
+    assert len(df) == 3
+    assert {"venue", "market_id", "resolved_value", "resolution_timestamp_utc"}.issubset(df.columns)
+    assert set(df["venue"]) == {"kalshi", "polymarket"}
+
+
+def test_resolved_market_outcomes_raises_on_empty_dir(tmp_path: Path) -> None:
+    empty = tmp_path / "resolved_empty"
+    empty.mkdir()
+    con = duckdb.connect()
+
+    with pytest.raises(FileNotFoundError, match=queries.RESOLVED_DIR_ENV) as exc:
+        queries.resolved_market_outcomes(con, resolved_dir=empty)
+
+    assert "resolved_dir" in str(exc.value)
+    assert str(empty) in str(exc.value)
+
+
+def test_resolved_market_outcomes_raises_when_env_unset(monkeypatch: Any, tmp_path: Path) -> None:
+    # Unset the env var, then point it at a nonexistent dir so the env branch is
+    # exercised deterministically. Must raise, never return an empty frame.
+    monkeypatch.setenv(queries.RESOLVED_DIR_ENV, str(tmp_path / "does_not_exist"))
+    con = duckdb.connect()
+
+    with pytest.raises(FileNotFoundError, match=queries.RESOLVED_DIR_ENV):
+        queries.resolved_market_outcomes(con)
+
+
+def test_resolved_market_outcomes_union_by_name_mixed_schema(tmp_path: Path) -> None:
+    resolved_dir = tmp_path / "resolved_market_outcomes"
+    # New full-schema (13-column) row.
+    write_table(
+        resolved_dir / "venue=kalshi" / "date=2026-05-20" / "part.parquet",
+        [resolved_row_full("kalshi", "k1", datetime(2026, 5, 20, tzinfo=UTC), 1.0)],
+        resolved_outcome_schema(),
+    )
+    # Old reduced-schema (4-column) row from before the schema grew.
+    write_table(
+        resolved_dir / "venue=polymarket" / "date=2026-05-19" / "part.parquet",
+        [
+            {
+                "venue": "polymarket",
+                "market_id": "p1",
+                "resolution_timestamp_utc": datetime(2026, 5, 19, tzinfo=UTC),
+                "resolved_value": 0.0,
+            }
+        ],
+        resolved_outcome_old_schema(),
+    )
+    con = duckdb.connect()
+
+    df = queries.resolved_market_outcomes(con, resolved_dir=resolved_dir)
+
+    assert len(df) == 2
+    assert {"venue", "market_id", "resolved_value", "resolution_timestamp_utc"}.issubset(df.columns)
+    # union_by_name fills the old row's missing columns (e.g. final_top_bid) with NULL.
+    assert df.loc[df["market_id"] == "p1", "final_top_bid"].isna().all()
 
 
 @pytest.mark.parametrize(
@@ -327,6 +375,25 @@ def write_snapshot_only_fixture(tmp_path: Path) -> Path:
     return data_dir
 
 
+def write_resolved_fixture(tmp_path: Path) -> Path:
+    resolved_dir = tmp_path / "resolved_market_outcomes"
+    base = datetime(2026, 5, 17, 12, tzinfo=UTC)
+    write_table(
+        resolved_dir / "venue=kalshi" / "date=2026-05-17" / "part.parquet",
+        [
+            resolved_row_full("kalshi", "kalshi-1", base, 1.0),
+            resolved_row_full("kalshi", "kalshi-2", base + timedelta(hours=1), 0.0),
+        ],
+        resolved_outcome_schema(),
+    )
+    write_table(
+        resolved_dir / "venue=polymarket" / "date=2026-05-17" / "part.parquet",
+        [resolved_row_full("polymarket", "poly-1", base + timedelta(hours=2), 1.0)],
+        resolved_outcome_schema(),
+    )
+    return resolved_dir
+
+
 def write_table(path: Path, rows: list[dict[str, Any]], schema: pa.Schema) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(rows, schema=schema), path)
@@ -382,6 +449,62 @@ def market_metadata_snapshot_schema() -> pa.Schema:
             ("raw_json", pa.string()),
         ]
     )
+
+
+def resolved_outcome_schema() -> pa.Schema:
+    return pa.schema(
+        [
+            ("schema_version", pa.int16()),
+            ("venue", pa.string()),
+            ("market_id", pa.string()),
+            ("resolution_timestamp_utc", pa.timestamp("us", tz="UTC")),
+            ("venue_resolved_at_utc", pa.timestamp("us", tz="UTC")),
+            ("resolved_value", pa.float64()),
+            ("resolution_source", pa.string()),
+            ("final_top_bid", pa.float64()),
+            ("final_top_ask", pa.float64()),
+            ("final_spread", pa.float64()),
+            ("final_snapshot_timestamp_utc", pa.timestamp("us", tz="UTC")),
+            ("metadata_snapshot_id", pa.string()),
+            ("is_disappeared_detection", pa.bool_()),
+        ]
+    )
+
+
+def resolved_outcome_old_schema() -> pa.Schema:
+    """Reduced pre-evolution schema (only the original core columns)."""
+
+    return pa.schema(
+        [
+            ("venue", pa.string()),
+            ("market_id", pa.string()),
+            ("resolution_timestamp_utc", pa.timestamp("us", tz="UTC")),
+            ("resolved_value", pa.float64()),
+        ]
+    )
+
+
+def resolved_row_full(
+    venue: str,
+    market_id: str,
+    timestamp: datetime,
+    outcome: float,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "venue": venue,
+        "market_id": market_id,
+        "resolution_timestamp_utc": timestamp,
+        "venue_resolved_at_utc": timestamp,
+        "resolved_value": outcome,
+        "resolution_source": "api",
+        "final_top_bid": 0.4,
+        "final_top_ask": 0.6,
+        "final_spread": 0.2,
+        "final_snapshot_timestamp_utc": timestamp - timedelta(minutes=30),
+        "metadata_snapshot_id": f"{venue}:{market_id}",
+        "is_disappeared_detection": False,
+    }
 
 
 def snapshot_row(

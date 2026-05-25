@@ -16,6 +16,9 @@ DEFAULT_DATA_DIR = Path("~/pm-edge-data/forward_index").expanduser()
 DATA_DIR_ENV = "PM_EDGE_LOCAL_FORWARD_INDEX_DIR"
 EXPECTED_TABLES = ("order_book_snapshots", "trade_events", "market_metadata_snapshots")
 
+RESOLVED_DEFAULT_DATA_DIR = Path("~/pm-edge-data/resolved_market_outcomes").expanduser()
+RESOLVED_DIR_ENV = "PM_EDGE_LOCAL_RESOLVED_DIR"
+
 TIMESCALE_RE = re.compile(r"^\d+\s+(minute|hour|day)s?$")
 GEOPOLITICS_PATTERN = (
     r"\b("
@@ -720,28 +723,40 @@ def multi_timescale_aggregation(
 def resolved_market_outcomes(
     con: duckdb.DuckDBPyConnection,
     since: datetime | None = None,
+    resolved_dir: Path | None = None,
 ) -> pd.DataFrame:
-    """Markets that have resolved within the captured data range.
+    """Markets resolved by the resolution watcher, read from the resolved archive.
 
-    Returns columns: venue, market_id, resolution_timestamp, resolved_value,
-    final_top_bid, final_top_ask, final_spread.
+    Reads ``<resolved_dir>/**/*.parquet`` with ``union_by_name=true`` because the
+    schema has gained columns over time (older parquet has fewer). ``resolved_dir``
+    defaults to the ``PM_EDGE_LOCAL_RESOLVED_DIR`` environment variable, or
+    ``~/pm-edge-data/resolved_market_outcomes`` if unset. ``since`` filters on
+    ``resolution_timestamp_utc``.
 
-    NOTE: resolution-watcher is not yet built, so this currently returns an
-    empty DataFrame with the target schema.
+    Returns one row per resolved outcome, including ``venue``, ``market_id``,
+    ``resolved_value`` and ``resolution_timestamp_utc``.
+
+    Raises ``FileNotFoundError`` if the resolved directory does not exist or holds
+    no parquet — this helper never returns a silently-empty frame. The resolution
+    watcher has produced data since Entry 19, so an empty read almost always means
+    a misconfigured path, not "no resolutions"; failing loudly avoids drawing a
+    false conclusion from a stale/empty result.
     """
 
-    del con, since
-    return pd.DataFrame(
-        columns=[
-            "venue",
-            "market_id",
-            "resolution_timestamp",
-            "resolved_value",
-            "final_top_bid",
-            "final_top_ask",
-            "final_spread",
-        ]
+    root, source = _resolve_resolved_dir(resolved_dir)
+    if not root.is_dir() or not any(root.rglob("*.parquet")):
+        raise FileNotFoundError(
+            f"No resolved-outcome parquet found under resolved_dir={root} resolved "
+            f"from {source}; set {RESOLVED_DIR_ENV} or pass resolved_dir= explicitly. "
+            f"Expected files at {root / '**' / '*.parquet'}."
+        )
+    glob = _sql_string(str(root / "**" / "*.parquet"))
+    where, params = _time_filters("resolution_timestamp_utc", since=since)
+    sql = (
+        f"SELECT * FROM read_parquet({glob}, union_by_name=true) "
+        f"WHERE {where} ORDER BY resolution_timestamp_utc"
     )
+    return _fetch_df(con, sql, params)
 
 
 def _create_forward_index_views(con: duckdb.DuckDBPyConnection, data_dir: Path) -> None:
@@ -830,6 +845,15 @@ def _resolve_data_dir(data_dir: Path | None) -> tuple[Path, str]:
     if env_value:
         return Path(env_value).expanduser(), f"env var {DATA_DIR_ENV}"
     return DEFAULT_DATA_DIR, "default"
+
+
+def _resolve_resolved_dir(resolved_dir: Path | None) -> tuple[Path, str]:
+    if resolved_dir is not None:
+        return resolved_dir.expanduser(), "explicit arg"
+    env_value = os.environ.get(RESOLVED_DIR_ENV)
+    if env_value:
+        return Path(env_value).expanduser(), f"env var {RESOLVED_DIR_ENV}"
+    return RESOLVED_DEFAULT_DATA_DIR, "default"
 
 
 def _validate_data_dir(data_dir: Path, source: str) -> None:

@@ -782,6 +782,23 @@ neither current venue provides.
 **Dead hypotheses (do not re-run):** calibration-gap, depth-imbalance, velocity,
 volatility. All four nulls, one cause.
 
+## Entry 24 — Experiment 1: Liquidity-tier selection — KILL
+### 2026-05-24
+
+Pre-registered: |gap| worsens monotonically toward illiquidity AND bottom-tier
+mispricing is consistent-sign with |gap| > 0.05.
+
+Result (n=129, volume_24h tiers, lag-clean, resolution_timestamp_utc anchor):
+Q1 lowest gap -0.043 (Brier 0.057) | Q2 -0.041 | Q3 +0.199 | Q4 +0.064.
+Monotonic: FALSE — most-illiquid tier is best-calibrated; largest gap is mid-tier
+Q3 (n=32, no mechanism, likely MLB late-game variance, explicitly not chased).
+
+VERDICT: KILL — both criteria fail. Caveat: 126/147 Kalshi, so this kills the
+hypothesis as testable on current data ("no illiquidity edge within Kalshi
+sports"). Reproducible artifact: scripts/experiment_01_liquidity_calibration.py.
+
+Doors remaining: Exp 2 (near-resolution capture), 3, 4, 5.
+
 ## Usage note
 
 This log is append-only. New entries get a date and a stability tag. Old entries are not edited except to add a "Resolved", "Refuted", or "Superseded" annotation at the top of the section, with a link to the entry that supersedes it. The intent is a faithful record of the reasoning path, including paths that turn out to be wrong, because the wrong paths are diagnostic information about how the project's thinking evolved.
