@@ -161,6 +161,10 @@ async def run() -> None:
         max_memory_mb=args.max_memory_mb,
         polling_mode=args.polling_mode,
         dry_run=args.dry_run,
+        near_resolution_capture_enabled=settings.near_resolution_capture_enabled,
+        near_resolution_window_seconds=float(settings.near_resolution_window_seconds),
+        near_resolution_cadence_seconds=settings.near_resolution_cadence_seconds,
+        near_resolution_max_markets=settings.near_resolution_max_markets,
     )
     writer = BufferedParquetWriter(config.output_dir)
     runner = IndexerRunner(config=config, indexers=indexers, writer=writer)

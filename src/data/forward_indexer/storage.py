@@ -62,16 +62,29 @@ class BufferedParquetWriter:
                 if len(self._seen_keys[table]) >= self.max_seen_keys_per_table:
                     break
 
-    async def add_records(self, table: TableName, records: list[dict[str, Any]]) -> int:
-        """Add records to an in-memory buffer and return accepted count."""
+    async def add_records(
+        self,
+        table: TableName,
+        records: list[dict[str, Any]],
+        *,
+        bypass_dedup: bool = False,
+    ) -> int:
+        """Add records to an in-memory buffer and return accepted count.
+
+        ``bypass_dedup`` writes every record unconditionally and does NOT touch
+        the dedupe set — used for near-resolution hi-cad capture, where identical
+        consecutive books must all be retained and the global dedupe set must stay
+        reserved for normal-cadence markets.
+        """
 
         accepted = 0
         async with self._lock:
             for record in records:
-                key = record_key(table, record)
-                if key in self._seen_keys[table]:
-                    continue
-                self._remember_key(table, key)
+                if not bypass_dedup:
+                    key = record_key(table, record)
+                    if key in self._seen_keys[table]:
+                        continue
+                    self._remember_key(table, key)
                 self._buffers[table].append(record)
                 accepted += 1
                 if self.pending_record_count >= self.flush_max_records:

@@ -10,7 +10,7 @@ import signal
 import subprocess
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,20 @@ from .filters import (
 )
 from .schemas import MARKET_METADATA_SCHEMA_VERSION, TableName
 from .storage import BufferedParquetWriter
+
+# Distinct tag for hi-cad near-resolution snapshots. MUST match the literal that
+# scripts/experiment_02_capture_rate.py filters on (its HICAD_SOURCE constant);
+# without an exact match the experiment's data cannot be isolated.
+NEAR_RESOLUTION_SOURCE = "near_resolution_hicad"
+# Venues eligible for hi-cad capture. Kalshi only: it has reliable close times and
+# is the frozen-pre-resolution venue (Entry 23). Polymarket is excluded — its
+# capture-to-resolution lag (~16h median) means near-close books are too stale to
+# be worth the extra write volume.
+NEAR_RESOLUTION_VENUES = ("kalshi",)
+# How long after the close timestamp to keep capturing (catch the resolution snap).
+NEAR_RESOLUTION_GRACE_SECONDS = 300.0
+# Throttle the shed warning so a sustained memory crisis does not spam the journal.
+_SHED_LOG_INTERVAL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -44,6 +58,12 @@ class RunnerConfig:
     polling_mode: bool = False
     dry_run: bool = False
     heartbeat_seconds: float = 60.0
+    # Experiment 2 — high-cadence near-resolution capture (OFF by default).
+    near_resolution_capture_enabled: bool = False
+    near_resolution_window_seconds: float = 1800.0
+    near_resolution_cadence_seconds: float = 2.0
+    near_resolution_max_markets: int = 30
+    near_resolution_grace_seconds: float = NEAR_RESOLUTION_GRACE_SECONDS
 
 
 class IndexerRunner:
@@ -68,6 +88,8 @@ class IndexerRunner:
         self._snapshots_written = 0
         self._last_heartbeat_snapshots = 0
         self._last_heartbeat_at = datetime.now(tz=UTC)
+        self._near_resolution_active = 0
+        self._last_shed_log_at: datetime | None = None
 
     async def run(self) -> None:
         """Run until cancelled or stopped by signal."""
@@ -86,6 +108,8 @@ class IndexerRunner:
                 asyncio.create_task(self._emit_loop()),
                 asyncio.create_task(self._heartbeat_loop()),
             ]
+            if self.config.near_resolution_capture_enabled:
+                self._main_tasks.append(asyncio.create_task(self._near_resolution_loop()))
             await asyncio.gather(*self._main_tasks)
 
     async def stop(self) -> None:
@@ -109,12 +133,23 @@ class IndexerRunner:
     async def discover_once(self) -> None:
         """Run one discovery cycle and capture metadata snapshots."""
 
+        # When hi-cad near-resolution capture is enabled, keep markets tracked all
+        # the way to close so their books stay warm for the final window — the
+        # normal `min_time_to_close_hours` filter would otherwise drop them ~2h out,
+        # long before the near-resolution window opens, and the feature would have
+        # nothing to capture. Gated behind the flag, so flag-OFF behaviour is
+        # identical to before.
+        min_time_to_close_hours = (
+            0.0
+            if self.config.near_resolution_capture_enabled
+            else self.config.min_time_to_close_hours
+        )
         thresholds = ActivityThresholds(
             min_24h_volume_usd=self.config.min_24h_volume_usd,
             max_spread_cents=self.config.max_spread_cents,
             max_last_trade_age_hours=self.config.max_last_trade_age_hours,
             min_market_age_minutes=self.config.min_market_age_minutes,
-            min_time_to_close_hours=self.config.min_time_to_close_hours,
+            min_time_to_close_hours=min_time_to_close_hours,
         )
         captured_at = datetime.now(tz=UTC)
         previous_tracked = {
@@ -241,6 +276,84 @@ class IndexerRunner:
             if await self._sleep_or_stop(self.config.emit_cadence_seconds):
                 break
 
+    async def _near_resolution_loop(self) -> None:
+        while not self._stop.is_set():
+            await self.capture_near_resolution_once()
+            if await self._sleep_or_stop(self.config.near_resolution_cadence_seconds):
+                break
+
+    async def capture_near_resolution_once(self) -> int:
+        """Capture one hi-cad batch for near-close markets; dedup bypassed.
+
+        Returns the number of snapshots written. Sheds (writes nothing) when
+        process memory is over the ceiling, so this mode can never be the thing
+        that OOM-kills the box.
+        """
+
+        now = datetime.now(tz=UTC)
+        selected = self._select_near_resolution_markets(now=now, memory_mb=current_memory_mb())
+        self._near_resolution_active = len(selected)
+        if not selected:
+            return 0
+        rows: list[dict[str, Any]] = []
+        for indexer, market in selected:
+            state = await indexer.current_book_state(market.market_id)
+            if state is None:
+                continue
+            row = await state.snapshot(timestamp=now)
+            row["snapshot_source"] = NEAR_RESOLUTION_SOURCE
+            rows.append(row)
+        if not rows:
+            return 0
+        accepted = await self.writer.add_records(
+            TableName.ORDER_BOOK_SNAPSHOTS, rows, bypass_dedup=True
+        )
+        self._snapshots_written += accepted
+        return accepted
+
+    def _select_near_resolution_markets(
+        self, *, now: datetime, memory_mb: float
+    ) -> list[tuple[VenueIndexer, MarketDescriptor]]:
+        """Return up to ``max_markets`` soonest-closing in-window markets.
+
+        Shed to empty when memory is over the ceiling. The hard cap is always
+        enforced, so concurrent hi-cad markets never exceed ``max_markets``.
+        """
+
+        if memory_mb > self.config.max_memory_mb:
+            self._log_shed(memory_mb=memory_mb, now=now)
+            return []
+
+        window = timedelta(seconds=self.config.near_resolution_window_seconds)
+        grace = timedelta(seconds=self.config.near_resolution_grace_seconds)
+        candidates: list[tuple[datetime, VenueIndexer, MarketDescriptor]] = []
+        for indexer in self.indexers:
+            if indexer.venue not in NEAR_RESOLUTION_VENUES:
+                continue
+            for market in self._tracked_markets.get(indexer.venue, []):
+                if market.end_date is None:
+                    continue
+                close_ts = _to_utc(market.end_date)
+                if close_ts - window <= now < close_ts + grace:
+                    candidates.append((close_ts, indexer, market))
+        candidates.sort(key=lambda item: item[0])  # soonest-closing first
+        capped = candidates[: self.config.near_resolution_max_markets]
+        return [(indexer, market) for _, indexer, market in capped]
+
+    def _log_shed(self, *, memory_mb: float, now: datetime) -> None:
+        if (
+            self._last_shed_log_at is not None
+            and (now - self._last_shed_log_at).total_seconds() < _SHED_LOG_INTERVAL_SECONDS
+        ):
+            return
+        self._last_shed_log_at = now
+        self._logger.warning(
+            "forward_indexer_near_resolution_shed",
+            memory_mb=round(memory_mb, 2),
+            max_memory_mb=self.config.max_memory_mb,
+            reason="memory_ceiling_exceeded",
+        )
+
     async def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():
             if await self._sleep_or_stop(self.config.heartbeat_seconds):
@@ -258,6 +371,7 @@ class IndexerRunner:
                 ),
                 memory_mb=round(current_memory_mb(), 2),
                 dedupe_keys_retained=self.writer.seen_key_count,
+                near_resolution_markets_active=self._near_resolution_active,
                 errors_since_last_heartbeat=sum(
                     item.stats().errors_since_heartbeat for item in self.indexers
                 ),
@@ -365,6 +479,10 @@ def _is_terminal_market(market: MarketDescriptor) -> bool:
 
 def _chunks(markets: list[MarketDescriptor], size: int) -> list[list[MarketDescriptor]]:
     return [markets[index : index + size] for index in range(0, len(markets), size)]
+
+
+def _to_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def current_memory_mb() -> float:

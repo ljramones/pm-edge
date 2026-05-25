@@ -1,7 +1,9 @@
 # Experiment 2 — Near-Resolution Capture: Deploy & Monitor Runbook
 _Created 2026-05-24. Amended 2026-05-24 (reconciliation pass): memory thresholds
 re-anchored to the real 1500M wall, unit-deploy `cp` step added, duration/stop rule
-+ kill condition pre-registered, provisional names reconciled against existing code._
++ kill condition pre-registered. Final pass: identifier names CONFIRMED against the
+capture-change code; documented the close-filter relaxation (two-axis load) and the
+hi-cad auto-shed at `max_memory_mb` (raise to ~1300M for Exp 2)._
 
 _Supervised rollout of a memory-risky capture change on a box with an OOM/thrash
 history. Do NOT deploy-and-walk-away. Stay on the box for the first full
@@ -34,15 +36,30 @@ Read these before trusting any number below.
   one is the watcher" is right; "the indexer has no graceful wait" is not.
 - **Confirmed-real heartbeat fields:** `forward_indexer_heartbeat` already emits
   `memory_mb` and `snapshots_per_second` (`runner.py:252`). Use these as-is.
-- **PROVISIONAL identifiers — the producer (capture-change) code is NOT written yet.**
-  The env vars `PM_EDGE_NEAR_RESOLUTION_*` and the heartbeat field
-  `near_resolution_markets_active` exist in **no code** today; treat them as proposed
-  names and reconcile against the capture-change code the moment it lands. The
-  snapshot_source tag `near_resolution_hicad` is already assumed by the CONSUMER
-  `scripts/experiment_02_capture_rate.py` (`HICAD_SOURCE`), so the producer MUST emit
-  exactly `near_resolution_hicad` — if it emits anything else, both the capture-rate
-  check and the 2-week data isolation silently break. Lock all of these in the same
-  commit that adds the capture code.
+- **Identifiers — CONFIRMED against the capture-change code.** The env vars
+  `PM_EDGE_NEAR_RESOLUTION_CAPTURE_ENABLED` / `_WINDOW_SECONDS` / `_CADENCE_SECONDS`
+  / `_MAX_MARKETS` (`src/core/config.py`), the heartbeat field
+  `near_resolution_markets_active` (`runner.py` heartbeat), and the snapshot_source
+  tag `near_resolution_hicad` (`runner.py` `NEAR_RESOLUTION_SOURCE`) all match the
+  producer code and the consumer `scripts/experiment_02_capture_rate.py`
+  (`HICAD_SOURCE`). Verified at the bundle commit.
+- **Enabling the feature relaxes the discovery close-filter — it un-drops near-close
+  markets.** With the flag ON, `discover_once` sets `min_time_to_close_hours=0`, so
+  markets are tracked all the way to close (the default 2h filter would otherwise
+  drop them before the hi-cad window opens, and the feature would capture nothing).
+  Consequence: enabling adds load on **two axes** — the hi-cad 30-min window AND
+  normal-cadence (15s) capture of every near-close market in its final ~2h that was
+  previously dropped. Expect a higher normal-capture baseline, not just hi-cad
+  volume. (Flag OFF: the filter is unchanged, byte-identical behaviour.)
+- **Hi-cad auto-sheds at `max_memory_mb`, default 1024M** (env
+  `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB`) — NOT at the 1500M cgroup wall. This is
+  the app's own ceiling and is the FIRST line of defense (it sheds hi-cad markets to
+  zero, logged as `forward_indexer_near_resolution_shed`), below the operator's
+  manual intervene points and well below the kernel reclaim at MemoryHigh=1500M.
+  **At the default 1024M the shed will fire early** given the raised two-axis
+  baseline, under-capturing. For Exp 2, set `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB`
+  to ~1300M (in `.env`, alongside the feature flags) so the auto-shed sits just
+  under the 1500M wall and matches the GATE 3 intervene guidance.
 
 ## Deploying a unit-file change (read once)
 
@@ -119,8 +136,8 @@ sudo journalctl -u forward-indexer --since "2 minutes ago" --no-pager | grep hea
 ```
 
 **PASS criteria (all must hold):**
-- No new near-resolution activity (the provisional `near_resolution_markets_active`
-  field, if emitted when disabled, is `0`; or absent entirely).
+- No new near-resolution activity: `near_resolution_markets_active=0` in the
+  heartbeat (the loop is not even scheduled when the flag is OFF).
 - `memory_mb` within GATE 0 baseline.
 - `snapshots_per_second` within GATE 0 baseline.
 - Load average unchanged.
@@ -136,18 +153,28 @@ First live exposure at a third of the write pressure. Start small.
 
 ```bash
 # Set conservative env overrides in the indexer's EnvironmentFile (/opt/pm-edge/.env).
-# VERIFY the exact variable names against the capture-change code; the names below
-# are PROVISIONAL (no producer code exists yet).
+# Variable names below are CONFIRMED against the capture code (src/core/config.py).
 #   PM_EDGE_NEAR_RESOLUTION_CAPTURE_ENABLED=true
 #   PM_EDGE_NEAR_RESOLUTION_MAX_MARKETS=10        # NOT 30
 #   PM_EDGE_NEAR_RESOLUTION_CADENCE_SECONDS=5     # NOT 2
 #   PM_EDGE_NEAR_RESOLUTION_WINDOW_SECONDS=1800
+# Raise the app memory ceiling so hi-cad's auto-shed sits just under the 1500M wall
+# instead of the 1024M default (which would shed early under the raised baseline):
+#   PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300
 
 # .env edits need only a restart. If you instead edited the .service file, also:
 #   sudo cp deploy/forward_indexer/systemd/forward-indexer.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 sudo systemctl restart forward-indexer
 ```
+
+> **Expect a higher baseline than hi-cad volume alone.** Enabling the flag also
+> un-drops near-close markets (the close-filter relaxation), so normal-cadence
+> capture of markets in their final ~2h resumes too. Memory climbing above the
+> GATE 0 baseline at GATE 2 is partly this documented two-axis load — not
+> necessarily a bug. The code auto-sheds hi-cad at `max_memory_mb` before the
+> manual intervene points below; a `near_resolution_markets_active` drop to 0 with
+> a `forward_indexer_near_resolution_shed` log is the guard working.
 
 **Then WATCH for one full near-resolution window (~30 min).** You need a market
 actually within 30 min of close for the feature to do anything — if nothing is
@@ -166,7 +193,7 @@ uptime
 | Field | Healthy | INTERVENE |
 |---|---|---|
 | `memory_mb` | < ~0.73×HIGH (≈1100M @1500M) | climbing past ~0.8×HIGH (≈1200M) and not leveling → shed/disable |
-| `near_resolution_markets_active` *(provisional)* | ≤ 10 (the cap) | > 10 → cap logic broken, DISABLE NOW |
+| `near_resolution_markets_active` | ≤ 10 (the cap) | > 10 → cap logic broken, DISABLE NOW |
 | `snapshots_per_second` | baseline + ~2 | unbounded growth → DISABLE |
 | Load avg | < 3 | climbing toward 5+ → thrash risk, DISABLE |
 | Swap used | flat/draining | climbing steadily → thrash canary, DISABLE |
@@ -195,10 +222,15 @@ sudo systemctl restart forward-indexer
 | Field | Healthy | INTERVENE |
 |---|---|---|
 | `memory_mb` | < ~0.8×HIGH (≈1200M @1500M) | past ~0.87×HIGH (≈1300M) rising → shed/disable (HIGH=1500M is the wall) |
-| `near_resolution_markets_active` *(provisional)* | ≤ 30 | > 30 → DISABLE NOW |
+| `near_resolution_markets_active` | ≤ 30 | > 30 → DISABLE NOW |
 | `snapshots_per_second` | baseline + ~15 | unbounded → DISABLE |
 | Load avg | < 3 | toward 5+ → DISABLE |
 | Swap | flat/draining | climbing → DISABLE |
+
+> Memory bands assume `PM_EDGE_FORWARD_INDEXER_MAX_MEMORY_MB=1300` (set at GATE 2),
+> so the code's auto-shed (~1300M) and the manual `memory_mb` intervene point (~1300M)
+> coincide — the shed fires first, the manual row is the backstop if it doesn't hold.
+> Same two-axis baseline caveat as GATE 2 applies, larger here at full settings.
 
 **PASS:** clean full-settings window, `memory_mb` comfortably under HIGH, cap holds.
 → Feature is live. The accumulation clock starts now — record the date and track it

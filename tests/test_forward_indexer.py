@@ -24,6 +24,7 @@ from data.forward_indexer.filters import (
 from data.forward_indexer.kalshi import KalshiIndexer
 from data.forward_indexer.polymarket import PolymarketIndexer
 from data.forward_indexer.runner import (
+    NEAR_RESOLUTION_SOURCE,
     IndexerRunner,
     RunnerConfig,
     current_memory_mb,
@@ -1092,6 +1093,10 @@ async def test_forward_index_dry_run_smoke(monkeypatch: pytest.MonkeyPatch, tmp_
         kalshi_ws_url = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
         kalshi_request_delay_seconds = 0.0
         kalshi_max_close_days = 7.0
+        near_resolution_capture_enabled = False
+        near_resolution_window_seconds = 1800
+        near_resolution_cadence_seconds = 2.0
+        near_resolution_max_markets = 30
 
     monkeypatch.setattr(cli, "get_settings", lambda: Settings())
     monkeypatch.setattr(sys, "argv", ["forward_index.py", "--dry-run", "--venues", "polymarket"])
@@ -1490,3 +1495,284 @@ def tracked_and_untracked_markets(venue: str, *, now: datetime) -> list[MarketDe
         for idx in range(8)
     )
     return markets
+
+
+# --------------------------------------------------------------------------- #
+# Experiment 2 — high-cadence near-resolution capture
+# --------------------------------------------------------------------------- #
+class HiCadIndexer(VenueIndexer):
+    """Fake indexer that serves pre-built book states for given markets."""
+
+    def __init__(
+        self, *, venue: str = "kalshi", states: dict[str, BookState] | None = None
+    ) -> None:
+        self.venue = venue
+        self._states = states or {}
+        self._stats = VenueStats(venue=venue)
+
+    async def discover_markets(self) -> list[MarketDescriptor]:
+        return []
+
+    async def subscribe_books(self, markets: list[MarketDescriptor]) -> None:
+        return None
+
+    async def subscribe_trades(self, markets: list[MarketDescriptor]) -> None:
+        return None
+
+    async def current_book_state(self, market_id: str) -> BookState | None:
+        return self._states.get(market_id)
+
+    async def flush_pending(self) -> None:
+        return None
+
+    def stats(self) -> VenueStats:
+        return self._stats
+
+
+async def _hicad_state(market_id: str, *, bid: float, ask: float) -> BookState:
+    state = BookState(venue="kalshi", market_id=market_id)
+    await state.replace(
+        bids=[{"price": bid, "size": 10.0}],
+        asks=[{"price": ask, "size": 8.0}],
+        source="websocket",
+    )
+    return state
+
+
+def _near_close_market(
+    market_id: str, *, close_in_seconds: float, now: datetime
+) -> MarketDescriptor:
+    return MarketDescriptor(
+        venue="kalshi",
+        market_id=market_id,
+        question="Q",
+        end_date=now + timedelta(seconds=close_in_seconds),
+    )
+
+
+def _hicad_runner(
+    tmp_path: Path,
+    *,
+    indexer: VenueIndexer,
+    enabled: bool = True,
+    max_markets: int = 30,
+    window: float = 1800.0,
+    max_memory_mb: float = 4096.0,
+) -> IndexerRunner:
+    config = RunnerConfig(
+        output_dir=tmp_path,
+        near_resolution_capture_enabled=enabled,
+        near_resolution_window_seconds=window,
+        near_resolution_max_markets=max_markets,
+        max_memory_mb=max_memory_mb,
+    )
+    return IndexerRunner(config=config, indexers=[indexer], writer=BufferedParquetWriter(tmp_path))
+
+
+def _read_snapshots(tmp_path: Path) -> list[dict[str, Any]]:
+    files = list((tmp_path / "order_book_snapshots").rglob("*.parquet"))
+    return [row for path in files for row in pq.ParquetFile(path).read().to_pylist()]
+
+
+def test_near_resolution_disabled_by_default() -> None:
+    assert RunnerConfig().near_resolution_capture_enabled is False
+
+
+async def _hicad_loop_runs(tmp_path: Path, *, enabled: bool) -> bool:
+    """Run the runner briefly and report whether the hi-cad loop fired."""
+
+    runner = IndexerRunner(
+        config=RunnerConfig(
+            output_dir=tmp_path,
+            near_resolution_capture_enabled=enabled,
+            near_resolution_cadence_seconds=0.01,
+            discovery_cadence_seconds=60,
+            emit_cadence_seconds=60,
+            heartbeat_seconds=60,
+        ),
+        indexers=[HiCadIndexer()],
+        writer=BufferedParquetWriter(tmp_path),
+    )
+    calls: list[int] = []
+
+    async def _spy() -> int:
+        calls.append(1)
+        return 0
+
+    runner.capture_near_resolution_once = _spy  # type: ignore[method-assign]
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(0.1)
+    await runner.stop()
+    await asyncio.wait_for(task, timeout=1.0)
+    return bool(calls)
+
+
+@pytest.mark.asyncio
+async def test_near_resolution_loop_gated_by_flag(tmp_path: Path) -> None:
+    # Test 1: with the flag OFF the hi-cad loop is never scheduled; ON, it runs.
+    assert await _hicad_loop_runs(tmp_path, enabled=False) is False
+    assert await _hicad_loop_runs(tmp_path, enabled=True) is True
+
+
+@pytest.mark.asyncio
+async def test_hicad_capture_in_window_tags_snapshots(tmp_path: Path) -> None:
+    # Test 2 (capture path + tag): an in-window market is captured at hi-cad.
+    now = datetime.now(tz=UTC)
+    indexer = HiCadIndexer(states={"KX1": await _hicad_state("KX1", bid=0.4, ask=0.6)})
+    runner = _hicad_runner(tmp_path, indexer=indexer)
+    runner._tracked_markets = {"kalshi": [_near_close_market("KX1", close_in_seconds=600, now=now)]}
+
+    written = await runner.capture_near_resolution_once()
+    await runner.writer.flush()
+
+    assert written == 1
+    assert runner._near_resolution_active == 1
+    rows = [r for r in _read_snapshots(tmp_path) if r["snapshot_source"] == NEAR_RESOLUTION_SOURCE]
+    assert len(rows) == 1
+    assert rows[0]["market_id"] == "KX1"
+
+
+@pytest.mark.asyncio
+async def test_hicad_dedup_bypass_and_global_dedup_coexist(tmp_path: Path) -> None:
+    # Tests 2 (identical books both written) + 5 (global dedup intact for normals).
+    writer = BufferedParquetWriter(tmp_path)
+    fixed = datetime(2026, 5, 25, 18, 0, 0, tzinfo=UTC)
+    normal_row = await (await _hicad_state("KXNORM", bid=0.4, ask=0.6)).snapshot(timestamp=fixed)
+    hicad_row = await (await _hicad_state("KXHICAD", bid=0.4, ask=0.6)).snapshot(timestamp=fixed)
+    hicad_row["snapshot_source"] = NEAR_RESOLUTION_SOURCE
+
+    # Normal path: identical record twice -> deduped to one.
+    await writer.add_records(TableName.ORDER_BOOK_SNAPSHOTS, [dict(normal_row)])
+    await writer.add_records(TableName.ORDER_BOOK_SNAPSHOTS, [dict(normal_row)])
+    # Hi-cad path: identical record twice, dedup bypassed -> both written.
+    await writer.add_records(TableName.ORDER_BOOK_SNAPSHOTS, [dict(hicad_row)], bypass_dedup=True)
+    await writer.add_records(TableName.ORDER_BOOK_SNAPSHOTS, [dict(hicad_row)], bypass_dedup=True)
+    await writer.flush()
+
+    rows = _read_snapshots(tmp_path)
+    assert len([r for r in rows if r["market_id"] == "KXNORM"]) == 1
+    assert len([r for r in rows if r["market_id"] == "KXHICAD"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_hicad_outside_window_no_capture(tmp_path: Path) -> None:
+    # Test 3: a market outside the window is not captured.
+    now = datetime.now(tz=UTC)
+    indexer = HiCadIndexer(states={"KX1": await _hicad_state("KX1", bid=0.4, ask=0.6)})
+    runner = _hicad_runner(tmp_path, indexer=indexer, window=1800.0)
+    runner._tracked_markets = {
+        "kalshi": [_near_close_market("KX1", close_in_seconds=7200, now=now)]
+    }
+
+    written = await runner.capture_near_resolution_once()
+
+    assert written == 0
+    assert runner._near_resolution_active == 0
+
+
+@pytest.mark.asyncio
+async def test_hicad_max_markets_cap_soonest_first(tmp_path: Path) -> None:
+    # Test 4: 50 near-close markets -> only max_markets selected, soonest-closing first.
+    now = datetime.now(tz=UTC)
+    states = {f"KX{i}": await _hicad_state(f"KX{i}", bid=0.4, ask=0.6) for i in range(50)}
+    markets = [_near_close_market(f"KX{i}", close_in_seconds=100 + i, now=now) for i in range(50)]
+    runner = _hicad_runner(tmp_path, indexer=HiCadIndexer(states=states), max_markets=30)
+    runner._tracked_markets = {"kalshi": markets}
+
+    selected = runner._select_near_resolution_markets(now=now, memory_mb=100.0)
+
+    assert len(selected) == 30
+    assert [market.market_id for _, market in selected] == [f"KX{i}" for i in range(30)]
+
+
+@pytest.mark.asyncio
+async def test_hicad_heartbeat_emits_active_count(tmp_path: Path) -> None:
+    # Test 6: the heartbeat line includes near_resolution_markets_active.
+    runner = IndexerRunner(
+        config=RunnerConfig(
+            output_dir=tmp_path,
+            near_resolution_capture_enabled=True,
+            near_resolution_cadence_seconds=60,
+            discovery_cadence_seconds=60,
+            emit_cadence_seconds=60,
+            heartbeat_seconds=0.01,
+        ),
+        indexers=[HiCadIndexer()],
+        writer=BufferedParquetWriter(tmp_path),
+    )
+
+    class _RecordingLogger:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, Any]]] = []
+
+        def info(self, event: str, **kw: Any) -> None:
+            self.events.append((event, kw))
+
+        def warning(self, event: str, **kw: Any) -> None:
+            self.events.append((event, kw))
+
+        def exception(self, event: str, **kw: Any) -> None:
+            self.events.append((event, kw))
+
+    recorder = _RecordingLogger()
+    runner._logger = recorder  # type: ignore[assignment]
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(0.1)
+    await runner.stop()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    heartbeats = [kw for event, kw in recorder.events if event == "forward_indexer_heartbeat"]
+    assert heartbeats
+    assert all("near_resolution_markets_active" in kw for kw in heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_hicad_memory_guard_sheds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Test 7: over the memory ceiling, hi-cad sheds to nothing rather than OOMing.
+    now = datetime.now(tz=UTC)
+    states = {f"KX{i}": await _hicad_state(f"KX{i}", bid=0.4, ask=0.6) for i in range(5)}
+    markets = [_near_close_market(f"KX{i}", close_in_seconds=300, now=now) for i in range(5)]
+    runner = _hicad_runner(tmp_path, indexer=HiCadIndexer(states=states), max_memory_mb=500.0)
+    runner._tracked_markets = {"kalshi": markets}
+
+    # Under the ceiling: all five selected. Over the ceiling: shed to empty.
+    assert len(runner._select_near_resolution_markets(now=now, memory_mb=100.0)) == 5
+    assert runner._select_near_resolution_markets(now=now, memory_mb=999.0) == []
+
+    # And capture_once sheds when the live memory probe is over the ceiling.
+    monkeypatch.setattr("data.forward_indexer.runner.current_memory_mb", lambda: 999.0)
+    written = await runner.capture_near_resolution_once()
+    assert written == 0
+    assert runner._near_resolution_active == 0
+
+
+@pytest.mark.asyncio
+async def test_near_resolution_enabled_relaxes_close_filter(tmp_path: Path) -> None:
+    # Enabling hi-cad keeps near-close markets tracked (the default filter drops them).
+    now = datetime.now(tz=UTC)
+    near = MarketDescriptor(
+        venue="kalshi",
+        market_id="KXSOON",
+        question="Q",
+        volume_24h=50_000,
+        spread=0.02,
+        last_trade_at=now - timedelta(minutes=5),
+        created_at=now - timedelta(hours=3),
+        end_date=now + timedelta(minutes=30),  # inside the default 2h close filter
+    )
+
+    off = IndexerRunner(
+        config=RunnerConfig(output_dir=tmp_path, near_resolution_capture_enabled=False),
+        indexers=[StaticDiscoverIndexer(venue="kalshi", markets=[near])],
+        writer=BufferedParquetWriter(tmp_path),
+    )
+    await off.discover_once()
+    assert off._tracked_markets["kalshi"] == []
+
+    on = IndexerRunner(
+        config=RunnerConfig(output_dir=tmp_path, near_resolution_capture_enabled=True),
+        indexers=[StaticDiscoverIndexer(venue="kalshi", markets=[near])],
+        writer=BufferedParquetWriter(tmp_path),
+    )
+    await on.discover_once()
+    assert [m.market_id for m in on._tracked_markets["kalshi"]] == ["KXSOON"]

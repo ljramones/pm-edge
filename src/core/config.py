@@ -145,6 +145,14 @@ class Settings(BaseSettings):
     forward_indexer_max_tracked_markets_per_venue: int = Field(default=500, ge=1)
     forward_indexer_max_memory_mb: float = Field(default=1024.0, gt=0)
 
+    # Experiment 2 — high-cadence near-resolution capture (feature-flagged OFF).
+    # Env names are intentionally PM_EDGE_NEAR_RESOLUTION_* (no forward_indexer_
+    # prefix) to match the deploy runbook and experiment_02_capture_rate.py.
+    near_resolution_capture_enabled: bool = False
+    near_resolution_window_seconds: int = Field(default=1800, ge=1)
+    near_resolution_cadence_seconds: float = Field(default=2.0, gt=0)
+    near_resolution_max_markets: int = Field(default=30, ge=1)
+
     @model_validator(mode="after")
     def resolve_relative_paths(self) -> Settings:
         """Resolve project data paths from repo root to avoid cwd-dependent writes."""
