@@ -20,8 +20,8 @@ NoNewPrivileges=true
 # leave headroom on the 2GB box above the watcher (MemoryMax=600M) + OS. VERIFY
 # the indexer's real steady-state/peak memory_mb before trusting these — see
 # docs/EXPERIMENT_2_DEPLOY_RUNBOOK.md GATE 0.
-MemoryHigh=1000M
-MemoryMax=1200M
+MemoryHigh=1500M
+MemoryMax=1800M
 MemoryAccounting=yes
 
 [Install]
