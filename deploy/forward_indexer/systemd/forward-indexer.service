@@ -17,7 +17,7 @@ TimeoutStopSec=60
 NoNewPrivileges=true
 # Memory caps so a discovery/capture spike degrades gracefully (MemoryHigh
 # reclaims) and is contained (MemoryMax) instead of OOM-killing the box. Numbers
-# leave headroom on the 2GB box above the watcher (MemoryMax=600M) + OS. VERIFY
+# leave headroom on the 4GB box above the watcher (MemoryMax=600M) + OS.
 # the indexer's real steady-state/peak memory_mb before trusting these — see
 # docs/EXPERIMENT_2_DEPLOY_RUNBOOK.md GATE 0.
 MemoryHigh=1500M
